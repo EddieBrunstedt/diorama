@@ -8,6 +8,7 @@ pub use grid::{Island, TileKind, cell_to_world};
 
 use crate::juice::{Burst, Particles, Tween, Wobble};
 use crate::palette;
+use crate::phase::GameState;
 use crate::rng::Rng;
 use crate::voxel::{VOXEL, VoxelMaterial};
 use bevy::prelude::*;
@@ -33,7 +34,8 @@ impl Plugin for IslandPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Island::starting())
             .init_resource::<VoxelMaterial>()
-            .add_systems(Startup, spawn_island)
+            .add_systems(OnEnter(GameState::Intro), spawn_island)
+            .add_systems(OnExit(GameState::GameOver), clear_island)
             .add_systems(Update, fell_trees);
     }
 }
@@ -143,6 +145,18 @@ fn spawn_island(
             }
         }
     }
+}
+
+/// Clears the old run's island (trees and all) and goes back to the starting island.
+fn clear_island(
+    mut commands: Commands,
+    tiles: Query<Entity, With<Tile>>,
+    mut island: ResMut<Island>,
+) {
+    for tile in &tiles {
+        commands.entity(tile).despawn();
+    }
+    *island = Island::starting();
 }
 
 /// Topples felled trees, leaves a stump, and breaks the trunk into chunks once it has landed.

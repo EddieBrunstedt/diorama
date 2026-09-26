@@ -9,6 +9,7 @@ use super::{
 use crate::island::{Felled, Tree};
 use crate::juice::{Burst, Flight, FlightTarget, Landed, Particles, Squash, Tween, Wobble};
 use crate::palette;
+use crate::phase::{GameState, building_allowed};
 use crate::towers::{BuildSite, TowerAssets, finish_site, spawn_site};
 use crate::tuning::KEEPER_SPEED;
 use crate::ui::{OrderFinished, Popup};
@@ -26,7 +27,7 @@ const HEAD_HEIGHT: f32 = 0.7;
 
 pub(super) fn carry_out_orders(
     mut commands: Commands,
-    time: Res<Time>,
+    (time, state): (Res<Time>, Res<State<GameState>>),
     mut queue: ResMut<OrderQueue>,
     mut backpack: ResMut<Backpack>,
     nav: Res<NavGrid>,
@@ -72,7 +73,8 @@ pub(super) fn carry_out_orders(
     let task = std::mem::take(&mut keeper.task);
     keeper.task = match task {
         Task::Idle => {
-            let Some(order) = queue.orders().first().copied() else {
+            // During the wave, builds wait: he goes on with the orders behind them.
+            let Some(order) = queue.next_up(building_allowed(*state.get())).copied() else {
                 return;
             };
             let problem = backpack.problem(&order.kind);
@@ -83,7 +85,7 @@ pub(super) fn carry_out_orders(
                 .flatten();
             match path {
                 Some(path) => {
-                    queue.start();
+                    queue.start(order.id);
                     let site = match order.kind {
                         OrderKind::Build(cell) => {
                             Some(spawn_site(&mut commands, &tower_assets, &voxel, cell))

@@ -72,6 +72,8 @@ pub const BLUEPRINT_PROBLEM: Color = Color::srgb_u8(0xFF, 0xB4, 0xA8);
 
 // Enemies.
 pub const SLIME: Color = Color::srgb_u8(0xA0, 0x84, 0xE8);
+/// Flags builds that wait for the wave to end: a deeper slime lilac that reads on paper.
+pub const WAVE_HOLD: Color = Color::srgb_u8(0x84, 0x64, 0xD4);
 
 // The prepare phase and the bell.
 pub const BRASS: Color = Color::srgb_u8(0xE6, 0xA8, 0x3E);

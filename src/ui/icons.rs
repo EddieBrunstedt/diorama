@@ -128,6 +128,21 @@ const COIN: &[&str] = &[
     "............",
 ];
 
+const HEARTH: &[&str] = &[
+    ".....o......",
+    "....oFo.....",
+    "....oFFo....",
+    "...oFCFo.o..",
+    "..oFFCCFoFo.",
+    "..oFCCCCFFo.",
+    ".oFCCnnCCFo.",
+    ".oFCnnnnCFo.",
+    "..oFCnnCFo..",
+    "oooooooooooo",
+    "osssSsssSsso",
+    "oooooooooooo",
+];
+
 /// Icon handles for the UI.
 #[derive(Resource)]
 pub struct Icons {
@@ -139,6 +154,7 @@ pub struct Icons {
     pub hourglass: Handle<Image>,
     pub slime: Handle<Image>,
     pub coin: Handle<Image>,
+    pub hearth: Handle<Image>,
 }
 
 impl FromWorld for Icons {
@@ -153,6 +169,7 @@ impl FromWorld for Icons {
             hourglass: images.add(pixel_art(HOURGLASS)),
             slime: images.add(pixel_art(SLIME)),
             coin: images.add(pixel_art(COIN)),
+            hearth: images.add(pixel_art(HEARTH)),
         }
     }
 }
@@ -182,6 +199,9 @@ fn pixel_color(key: char) -> Option<Color> {
         'M' => crate::voxel::shade(palette::SLIME, 0.7),
         'k' => palette::KEEPER_EYES,
         'l' => palette::UI_PAPER_DARK,
+        'S' => crate::voxel::shade(palette::HEARTH_STONE, 0.75),
+        'F' => palette::FLAME_OUTER,
+        'C' => palette::FLAME_CORE,
         _ => return None,
     })
 }
@@ -218,7 +238,7 @@ mod tests {
 
     #[test]
     fn icons_are_square_and_use_known_colors() {
-        for icon in [TREE, TOWER, BOOT, LOG, BELL, HOURGLASS, SLIME, COIN] {
+        for icon in [TREE, TOWER, BOOT, LOG, BELL, HOURGLASS, SLIME, COIN, HEARTH] {
             assert_eq!(icon.len(), 12);
             for row in icon {
                 assert_eq!(row.len(), 12, "{row:?}");

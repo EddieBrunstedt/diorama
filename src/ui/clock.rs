@@ -1,10 +1,13 @@
 //! The prepare clock and the bell at the top of the screen, and banners announcing each phase.
+//! During the wave the clock counts the slimes left instead.
 
 use super::icons::Icons;
 use super::{font, paper};
+use crate::hearth::HearthHealth;
 use crate::juice::Shake;
 use crate::palette;
-use crate::phase::{BELL_KEY, GameState, PrepareClock, RingBell, Waves, bell_bonus};
+use crate::phase::{BELL_KEY, GameState, PrepareClock, RingBell, WaveCleared, Waves, bell_bonus};
+use crate::slimes::{WaveRun, WaveSpec};
 use bevy::picking::events::{Click, Out, Over, Pointer, Press, Release};
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
@@ -34,6 +37,8 @@ pub(super) struct ClockPanel {
     punch: f32,
     flip: f32,
     shown_second: Option<u32>,
+    /// Slimes left in the wave, as last shown.
+    shown_left: Option<u32>,
 }
 
 #[derive(Component)]
@@ -175,6 +180,7 @@ pub(super) fn spawn_clock(mut commands: Commands, icons: Res<Icons>) {
         punch: 0.0,
         flip: 0.0,
         shown_second: None,
+        shown_left: None,
     });
 
     // The bell: rings in the wave early, for bonus coin.
@@ -322,41 +328,56 @@ pub(super) fn update_clock(
     state: Res<State<GameState>>,
     clock: Res<PrepareClock>,
     waves: Res<Waves>,
+    run: Res<WaveRun>,
+    icon_images: Res<Icons>,
     panel: Single<(&mut ClockPanel, &mut UiTransform)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
     mut nodes: Query<(&mut Node, &mut BackgroundColor)>,
-    mut icons: Query<&mut UiTransform, Without<ClockPanel>>,
+    mut icons: Query<(&mut UiTransform, &mut ImageNode), Without<ClockPanel>>,
 ) {
     let (mut panel, mut transform) = panel.into_inner();
     let dt = time.delta_secs();
     let state = *state.get();
-    let preparing = state != GameState::Wave;
+    let preparing = matches!(state, GameState::Intro | GameState::Prepare);
     let hurry = state == GameState::Prepare && clock.left <= HURRY_SECONDS;
 
-    let (label, text, color) = if preparing {
-        let color = if hurry {
-            palette::PROBLEM
-        } else {
-            palette::UI_INK
-        };
-        (
+    let slimes_left = |left: u32| match left {
+        0 => "Cleared!".to_string(),
+        1 => "1 slime".to_string(),
+        left => format!("{left} slimes"),
+    };
+    let (label, text, color) = match state {
+        GameState::Intro | GameState::Prepare => (
             format!("WAVE {} IN", waves.current()),
             format_clock(clock.left),
-            color,
-        )
-    } else {
-        (
+            if hurry {
+                palette::PROBLEM
+            } else {
+                palette::UI_INK
+            },
+        ),
+        GameState::Wave => (
             format!("WAVE {}", waves.current()),
-            "Defend!".to_string(),
+            slimes_left(run.left()),
+            palette::WAVE_HOLD,
+        ),
+        GameState::GameOver => (
+            format!("WAVE {}", waves.current()),
+            "Lost".to_string(),
             palette::PROBLEM,
-        )
+        ),
     };
-    // Punch on every second of the last few.
+    // Punch on every second of the last few, and on every slime gone during the wave.
     let second = clock.left.ceil() as u32;
     if hurry && panel.shown_second.is_some_and(|shown| shown != second) {
         panel.punch = PUNCH_TIME;
     }
     panel.shown_second = Some(second);
+    let left = (state == GameState::Wave).then(|| run.left());
+    if left.is_some() && panel.shown_left.is_some() && left != panel.shown_left {
+        panel.punch = PUNCH_TIME;
+    }
+    panel.shown_left = left;
     for (entity, value, color) in [
         (panel.label, label, palette::UI_INK_SOFT),
         (panel.time, text, color),
@@ -369,16 +390,16 @@ pub(super) fn update_clock(
         }
     }
     if let Ok((mut node, mut background)) = nodes.get_mut(panel.fill) {
-        let fraction = if preparing {
-            clock.left / clock.total.max(1e-3)
-        } else {
-            1.0
+        let fraction = match state {
+            GameState::Intro | GameState::Prepare => clock.left / clock.total.max(1e-3),
+            GameState::Wave => run.left() as f32 / run.spec.count.max(1) as f32,
+            GameState::GameOver => 0.0,
         };
         node.width = Val::Percent(fraction * 100.0);
-        background.set_if_neq(BackgroundColor(if preparing && !hurry {
-            palette::BRASS
-        } else {
-            palette::PROBLEM
+        background.set_if_neq(BackgroundColor(match state {
+            GameState::Wave => palette::SLIME,
+            _ if preparing && !hurry => palette::BRASS,
+            _ => palette::PROBLEM,
         }));
     }
 
@@ -387,15 +408,28 @@ pub(super) fn update_clock(
     let k = panel.punch / PUNCH_TIME;
     let scale = 1.0 + 0.14 * k * (k * PI).sin().max(0.0) * 2.0;
     transform.set_if_neq(UiTransform::from_scale(Vec2::splat(scale)));
-    if let Ok(mut icon) = icons.get_mut(panel.icon) {
+    if let Ok((mut icon, mut image)) = icons.get_mut(panel.icon) {
         // The hourglass flips over when a prepare phase starts, and shivers when time is short.
-        let flip = PI * EaseFunction::BackOut.sample_clamped(1.0 - panel.flip / FLIP_TIME);
-        let shiver = if hurry {
-            0.12 * (time.elapsed_secs() * 30.0).sin()
+        // During the wave a slime takes its place and bounces.
+        let wanted = if preparing {
+            &icon_images.hourglass
         } else {
-            0.0
+            &icon_images.slime
         };
-        icon.rotation = Rot2::radians(PI - flip + shiver);
+        if image.image != *wanted {
+            image.image = wanted.clone();
+        }
+        let t = time.elapsed_secs();
+        if preparing {
+            let flip = PI * EaseFunction::BackOut.sample_clamped(1.0 - panel.flip / FLIP_TIME);
+            let shiver = if hurry { 0.12 * (t * 30.0).sin() } else { 0.0 };
+            icon.rotation = Rot2::radians(PI - flip + shiver);
+            icon.scale = Vec2::ONE;
+        } else {
+            let bounce = (t * 6.0).sin().abs();
+            icon.rotation = Rot2::IDENTITY;
+            icon.scale = Vec2::new(1.0 + 0.08 * (1.0 - bounce), 1.0 + 0.08 * bounce);
+        }
     }
 }
 
@@ -509,11 +543,13 @@ fn on_bell_click(click: On<Pointer<Click>>, mut rings: MessageWriter<RingBell>) 
 pub(super) fn announce_prepare(
     commands: Commands,
     waves: Res<Waves>,
+    banners: Query<&mut Banner>,
     mut panel: Single<&mut ClockPanel>,
 ) {
     panel.flip = FLIP_TIME;
     spawn_banner(
         commands,
+        banners,
         "Prepare!",
         palette::UI_PAPER,
         None,
@@ -525,6 +561,7 @@ pub(super) fn announce_wave(
     commands: Commands,
     icons: Res<Icons>,
     waves: Res<Waves>,
+    banners: Query<&mut Banner>,
     mut shake: ResMut<Shake>,
     mut bell: Single<&mut BellButton>,
 ) {
@@ -534,11 +571,15 @@ pub(super) fn announce_wave(
             bell.ring = RING_TIME;
             format!("+{bonus} coin for ringing early")
         }
-        None => "No slimes yet".to_string(),
+        None => format!(
+            "{} slimes are coming down the road",
+            WaveSpec::for_wave(waves.current()).count
+        ),
     };
     let icon = waves.bell_bonus.map(|_| icons.coin.clone());
     spawn_banner(
         commands,
+        banners,
         &format!("Wave {}!", waves.current()),
         palette::SLIME,
         icon,
@@ -546,13 +587,44 @@ pub(super) fn announce_wave(
     );
 }
 
+/// A banner when a wave is survived.
+pub(super) fn announce_cleared(
+    commands: Commands,
+    icons: Res<Icons>,
+    health: Res<HearthHealth>,
+    mut cleared: MessageReader<WaveCleared>,
+    banners: Query<&mut Banner>,
+) {
+    let Some(&WaveCleared(number)) = cleared.read().last() else {
+        return;
+    };
+    let subtitle = if health.hp == health.max {
+        "Not a scratch on the hearth".to_string()
+    } else {
+        format!("The hearth held: {}/{}", health.hp, health.max)
+    };
+    spawn_banner(
+        commands,
+        banners,
+        &format!("Wave {number} survived!"),
+        palette::FLAG,
+        Some(icons.hearth.clone()),
+        subtitle,
+    );
+}
+
 fn spawn_banner(
     mut commands: Commands,
+    mut banners: Query<&mut Banner>,
     title: &str,
     color: Color,
     icon: Option<Handle<Image>>,
     subtitle: String,
 ) {
+    // A new banner sends the old one on its way.
+    for mut banner in &mut banners {
+        banner.age = banner.age.max(BANNER_IN + BANNER_HOLD);
+    }
     let shadow = |alpha: f32| TextShadow {
         offset: Vec2::new(2.0, 3.0),
         color: palette::UI_INK.with_alpha(alpha),

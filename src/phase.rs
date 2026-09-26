@@ -1,15 +1,25 @@
-//! Game flow: the timed prepare phase, ringing the bell to start the wave early, and the wave.
+//! Game flow: the timed prepare phase, ringing the bell to start the wave early, the wave, and
+//! game over.
 //!
-//! `Intro` (the island assembles and the keeper lands) → `Prepare` (timed) → `Wave` → `Prepare`
-//! → ... Milestone 4 fills in the wave (slimes, towers, game over) and milestone 5 puts a tile offer
-//! between the wave and the next prepare phase. For now the wave is a short placeholder.
+//! `Intro` (the island assembles and the keeper lands) → `Prepare` (timed) → `Wave` (until every
+//! slime is gone) → `Prepare` → ... until the hearth goes out: `GameOver`, then back to `Intro` for
+//! a new run. Milestone 5 puts a tile offer between the wave and the next prepare phase
+//! (see [`after_wave`]).
+//!
+//! Starting over: every plugin tears down its part of the old run on `OnExit(GameOver)` and
+//! spawns the new one on `OnEnter(Intro)`, which also runs when the game starts.
 
+use crate::hearth::HearthHealth;
 use crate::juice::Tween;
 use crate::keeper::{Keeper, PlanSystems};
-use crate::tuning::{BELL_COINS_PER_SECOND, PLACEHOLDER_WAVE_SECONDS, PREPARE_SECONDS};
+use crate::slimes::WaveRun;
+use crate::tuning::{BELL_COINS_PER_SECOND, PREPARE_SECONDS};
 use bevy::prelude::*;
 
 pub const BELL_KEY: KeyCode = KeyCode::KeyB;
+pub const RESTART_KEY: KeyCode = KeyCode::KeyR;
+/// Seconds between the last slime going and the wave ending, to enjoy the moment.
+const CLEARED_PAUSE: f32 = 1.6;
 
 pub struct PhasePlugin;
 
@@ -18,10 +28,13 @@ impl Plugin for PhasePlugin {
         app.init_state::<GameState>()
             .init_resource::<PrepareClock>()
             .init_resource::<Waves>()
-            .init_resource::<WaveClock>()
+            .init_resource::<Cleared>()
             .add_message::<RingBell>()
+            .add_message::<WaveCleared>()
+            .add_message::<Restart>()
             .add_systems(OnEnter(GameState::Prepare), start_prepare)
             .add_systems(OnEnter(GameState::Wave), start_wave)
+            .add_systems(OnExit(GameState::GameOver), reset_run)
             .add_systems(
                 Update,
                 (
@@ -29,7 +42,8 @@ impl Plugin for PhasePlugin {
                     (tick_prepare, ring_bell)
                         .chain()
                         .run_if(in_state(GameState::Prepare)),
-                    run_placeholder_wave.run_if(in_state(GameState::Wave)),
+                    end_wave.run_if(in_state(GameState::Wave)),
+                    restart.run_if(in_state(GameState::GameOver)),
                 )
                     .before(PlanSystems),
             );
@@ -43,8 +57,10 @@ pub enum GameState {
     Intro,
     /// The timed build-up before a wave.
     Prepare,
-    /// Enemies attack.
+    /// Slimes come down the road until they're all gone.
     Wave,
+    /// The hearth went out. Shows the score until the player starts over.
+    GameOver,
 }
 
 /// Counts down the prepare phase.
@@ -81,8 +97,19 @@ impl PrepareClock {
 pub fn wave_deadline(state: GameState, clock: &PrepareClock) -> Option<f32> {
     match state {
         GameState::Intro | GameState::Prepare => Some(clock.left),
-        GameState::Wave => None,
+        GameState::Wave | GameState::GameOver => None,
     }
+}
+
+/// Whether the keeper may start building. Not during the wave: builds wait for the next
+/// prepare phase.
+pub fn building_allowed(state: GameState) -> bool {
+    matches!(state, GameState::Intro | GameState::Prepare)
+}
+
+/// Where the game goes once a wave is survived. Milestone 5 puts the tile offer here.
+pub fn after_wave() -> GameState {
+    GameState::Prepare
 }
 
 /// Bonus coin for ringing the bell with this much prepare time left.
@@ -112,9 +139,17 @@ impl Waves {
 #[derive(Message, Clone, Copy, Debug)]
 pub struct RingBell;
 
-/// Time left in the placeholder wave.
+/// The last slime of a wave is gone. Carries the wave's number.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct WaveCleared(pub u32);
+
+/// Asks to start a new run after game over (e.g. the "Play again" button was clicked).
+#[derive(Message, Clone, Copy, Debug)]
+pub struct Restart;
+
+/// Seconds since the current wave was cleared, if it has been.
 #[derive(Resource, Default)]
-struct WaveClock(f32);
+struct Cleared(Option<f32>);
 
 fn end_intro(
     keeper: Query<(), (With<Keeper>, Without<Tween>)>,
@@ -157,21 +192,55 @@ fn ring_bell(
     next.set(GameState::Wave);
 }
 
-fn start_wave(mut wave: ResMut<WaveClock>) {
-    wave.0 = PLACEHOLDER_WAVE_SECONDS;
+fn start_wave(mut cleared: ResMut<Cleared>) {
+    cleared.0 = None;
 }
 
-fn run_placeholder_wave(
+/// Ends the wave: game over when the hearth is out, survived once every slime is gone.
+fn end_wave(
     time: Res<Time>,
-    mut wave: ResMut<WaveClock>,
+    run: Res<WaveRun>,
+    hearth: Res<HearthHealth>,
+    mut cleared: ResMut<Cleared>,
     mut waves: ResMut<Waves>,
+    mut announce: MessageWriter<WaveCleared>,
     mut next: ResMut<NextState<GameState>>,
 ) {
-    wave.0 -= time.delta_secs();
-    if wave.0 <= 0.0 {
-        waves.completed += 1;
-        next.set(GameState::Prepare);
+    if hearth.is_out() {
+        next.set(GameState::GameOver);
+        return;
     }
+    if !run.cleared() {
+        return;
+    }
+    match &mut cleared.0 {
+        None => {
+            cleared.0 = Some(0.0);
+            announce.write(WaveCleared(waves.current()));
+        }
+        Some(since) => {
+            *since += time.delta_secs();
+            if *since >= CLEARED_PAUSE {
+                waves.completed += 1;
+                next.set(after_wave());
+            }
+        }
+    }
+}
+
+fn restart(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut restarts: MessageReader<Restart>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    if restarts.read().count() > 0 || keys.just_pressed(RESTART_KEY) {
+        next.set(GameState::Intro);
+    }
+}
+
+fn reset_run(mut waves: ResMut<Waves>, mut clock: ResMut<PrepareClock>) {
+    *waves = Waves::default();
+    *clock = PrepareClock::default();
 }
 
 #[cfg(test)]
@@ -204,5 +273,14 @@ mod tests {
         assert_eq!(wave_deadline(GameState::Prepare, &clock), Some(12.0));
         assert_eq!(wave_deadline(GameState::Intro, &clock), Some(12.0));
         assert_eq!(wave_deadline(GameState::Wave, &clock), None);
+        assert_eq!(wave_deadline(GameState::GameOver, &clock), None);
+    }
+
+    #[test]
+    fn no_building_during_the_wave() {
+        assert!(building_allowed(GameState::Intro));
+        assert!(building_allowed(GameState::Prepare));
+        assert!(!building_allowed(GameState::Wave));
+        assert!(!building_allowed(GameState::GameOver));
     }
 }

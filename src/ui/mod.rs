@@ -1,7 +1,9 @@
 //! The on-screen UI: the order queue and its timeline, the prepare clock and the bell, the wood
-//! counter, numbered markers over order targets, a label at the cursor, and popups and banners.
+//! and hearth counters, numbered markers over order targets, a label at the cursor, popups and
+//! banners, and the game over screen.
 
 mod clock;
+mod game_over;
 mod hud;
 mod icons;
 mod queue_panel;
@@ -23,7 +25,12 @@ impl Plugin for UiPlugin {
             .init_resource::<icons::Icons>()
             .add_systems(
                 Startup,
-                (hud::spawn_hud, queue_panel::spawn_panel, clock::spawn_clock),
+                (
+                    hud::spawn_hud,
+                    queue_panel::spawn_panel,
+                    clock::spawn_clock,
+                    game_over::spawn_game_over,
+                ),
             )
             .add_systems(OnEnter(GameState::Prepare), clock::announce_prepare)
             .add_systems(OnEnter(GameState::Wave), clock::announce_wave)
@@ -46,6 +53,15 @@ impl Plugin for UiPlugin {
                     hud::update_cursor_label,
                 )
                     .chain()
+                    .after(PlanSystems),
+            )
+            .add_systems(
+                Update,
+                (
+                    clock::announce_cleared,
+                    hud::update_hearth_counter,
+                    game_over::update_game_over,
+                )
                     .after(PlanSystems),
             );
     }
@@ -113,7 +129,18 @@ pub fn problem_text(planned: &PlannedOrder, wood_before: u32) -> Option<String> 
         }
         Problem::BackpackFull => "Backpack will be full".to_string(),
         Problem::Unreachable => Problem::Unreachable.message().to_string(),
+        Problem::WaveOn => "No building during the wave: waits for the next prepare phase".into(),
     })
+}
+
+/// The color that flags a problem: red for orders that will be skipped, slime lilac for builds
+/// waiting for the wave to end.
+pub fn problem_color(problem: Problem) -> Color {
+    if problem.holds() {
+        palette::WAVE_HOLD
+    } else {
+        palette::PROBLEM
+    }
 }
 
 /// A short duration, e.g. "2.5s", or "12s" once it's ten seconds or more.

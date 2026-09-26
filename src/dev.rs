@@ -6,6 +6,8 @@
 //! - `DIORAMA_DEMO=1` queues a few sample orders at startup.
 //! - `DIORAMA_SCRIPT="3 move 800 450; 3.1 down; 3.2 up"` fakes mouse input at the given times
 //!   (seconds): `move X Y` (logical pixels), `down`/`up` (left button), `shift`/`unshift`.
+//! - `DIORAMA_SPEED=4` runs the game four times as fast, e.g. to get to later waves quickly.
+//!   Screenshot and script times are in game time, so they speed up too.
 
 use crate::island::TreeId;
 use crate::keeper::{OrderKind, OrderQueue};
@@ -44,6 +46,16 @@ impl Plugin for DevPlugin {
         }
         if std::env::var("DIORAMA_DEMO").is_ok() {
             app.add_systems(Startup, queue_demo_orders);
+        }
+        if let Some(speed) = std::env::var("DIORAMA_SPEED")
+            .ok()
+            .and_then(|speed| speed.parse::<f32>().ok())
+        {
+            app.add_systems(Startup, move |mut time: ResMut<Time<Virtual>>| {
+                time.set_relative_speed(speed);
+                // Let long frames through, so fast-forwarding doesn't slow down again.
+                time.set_max_delta(std::time::Duration::from_secs_f32(0.25 * speed));
+            });
         }
         if let Ok(script) = std::env::var("DIORAMA_SCRIPT") {
             let steps =

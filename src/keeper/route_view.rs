@@ -120,7 +120,11 @@ pub(super) fn sync_ghosts(
         .iter()
         .filter(|planned| Some(planned.order.id) != started)
         .filter_map(|planned| match planned.order.kind {
-            OrderKind::Build(cell) => Some((cell, planned.problem.is_some())),
+            // A build waiting for the wave to end will still happen, so its ghost stays blue.
+            OrderKind::Build(cell) => Some((
+                cell,
+                planned.problem.is_some_and(|problem| !problem.holds()),
+            )),
             _ => None,
         })
         .collect();

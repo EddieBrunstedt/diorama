@@ -114,11 +114,13 @@ pub enum Progress {
     Started { end: Vec2 },
 }
 
-/// Plans the whole queue: problems, wood and paths for every order.
+/// Plans the whole queue: problems, wood and paths for every order. `building` is whether builds
+/// can be started now; during a wave they wait (see [`plan_wood`]).
 pub fn plan(
     orders: &[Order],
     progress: Progress,
     backpack: &Backpack,
+    building: bool,
     nav: &NavGrid,
     trees: &impl TreeLookup,
 ) -> Vec<PlannedOrder> {
@@ -132,7 +134,7 @@ pub fn plan(
         Progress::NotStarted { .. } => None,
     };
     let mut paths = HashMap::new();
-    let steps = plan_wood(orders, backpack, |order| {
+    let steps = plan_wood(orders, backpack, building, started, |order| {
         if Some(order.id) == started {
             apply_done(&order.kind, &mut nav, trees);
             return true;
@@ -214,6 +216,7 @@ mod tests {
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(2),
+            true,
             &nav,
             &trees,
         );
@@ -240,6 +243,7 @@ mod tests {
             queue(&through).orders(),
             Progress::NotStarted { keeper: START },
             &backpack(3),
+            true,
             &nav,
             &trees,
         );
@@ -247,6 +251,7 @@ mod tests {
             queue(&[through[0], OrderKind::Build(site), through[1]]).orders(),
             Progress::NotStarted { keeper: START },
             &backpack(3),
+            true,
             &nav,
             &trees,
         );
@@ -275,6 +280,7 @@ mod tests {
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(0),
+            true,
             &nav,
             &trees,
         );
@@ -295,6 +301,7 @@ mod tests {
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(0),
+            true,
             &nav,
             &trees,
         );
@@ -312,6 +319,7 @@ mod tests {
             queue.orders(),
             Progress::Started { end },
             &backpack(0),
+            true,
             &nav,
             &trees,
         );
@@ -330,6 +338,7 @@ mod tests {
                 keeper: Vec2::new(-2.0, 2.0),
             },
             &backpack(0),
+            true,
             &nav,
             &trees,
         );
@@ -351,6 +360,7 @@ mod tests {
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(3),
+            true,
             &nav,
             &trees,
         );
@@ -367,6 +377,29 @@ mod tests {
     }
 
     #[test]
+    fn during_the_wave_the_route_skips_waiting_builds() {
+        let (nav, trees) = setup();
+        let walk_to = Vec2::new(2.0, 2.0);
+        let queue = queue(&[
+            OrderKind::Build(IVec2::new(-1, 1)),
+            OrderKind::Walk(walk_to),
+        ]);
+        let planned = plan(
+            queue.orders(),
+            Progress::NotStarted { keeper: START },
+            &backpack(3),
+            false,
+            &nav,
+            &trees,
+        );
+        assert_eq!(planned[0].problem, Some(Problem::WaveOn));
+        assert_eq!(planned[0].seconds(), 0.0);
+        assert_eq!(planned[0].wood_after, 3);
+        assert_eq!(planned[1].path.first(), Some(&START));
+        assert_eq!(planned[1].path.last(), Some(&walk_to));
+    }
+
+    #[test]
     fn skipped_and_started_orders_take_no_planned_time() {
         let (nav, trees) = setup();
         let queue = queue(&[OrderKind::Chop(TREE), OrderKind::Build(IVec2::new(-1, 1))]);
@@ -374,6 +407,7 @@ mod tests {
             queue.orders(),
             Progress::Started { end: START },
             &backpack(0),
+            true,
             &nav,
             &trees,
         );

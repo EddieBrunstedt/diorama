@@ -1,9 +1,15 @@
 //! The hearth: the island's heart and the player's base. A stone fire pit with a crackling fire.
+//!
+//! Slimes that reach it hurt it ([`HearthHealth`]). The fire burns lower as it's hurt, and goes
+//! out when the hit points are gone: game over.
 
 use crate::island::{Tile, TileKind};
-use crate::juice::Tween;
+use crate::juice::{Burst, Particles, Shake, Tween, Wobble};
 use crate::palette;
+use crate::phase::GameState;
 use crate::rng::Rng;
+use crate::tuning::HEARTH_HP;
+use crate::ui::Popup;
 use crate::voxel::{VOXEL, VoxelMaterial, VoxelMesh, shade, vary};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
@@ -15,6 +21,16 @@ const SCALE: f32 = 1.15;
 const FIRELIGHT_INTENSITY: f32 = 120_000.0;
 /// Seconds between embers rising from the fire.
 const EMBER_INTERVAL: f32 = 0.14;
+/// How big the fire still burns just before it goes out, compared to a full-health fire.
+const LOWEST_FIRE: f32 = 0.4;
+/// How quickly the fire follows the hearth's health (per second, exponential).
+const FIRE_RATE: f32 = 4.0;
+/// Extra fire size right after a hit, fading at `FLARE_DECAY` per second.
+const HIT_FLARE: f32 = 0.7;
+const FLARE_DECAY: f32 = 2.5;
+const FLASH_TIME: f32 = 0.3;
+const HIT_SHAKE: f32 = 0.35;
+const OUT_SHAKE: f32 = 0.9;
 
 const MODEL_SALT: u64 = 5;
 
@@ -24,7 +40,83 @@ impl Plugin for HearthPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelMaterial>()
             .init_resource::<FireAssets>()
-            .add_systems(Update, (spawn_hearth, flicker, spawn_embers, rise_embers));
+            .init_resource::<HearthHealth>()
+            .init_resource::<Fire>()
+            .add_message::<HearthHit>()
+            .add_systems(OnExit(GameState::GameOver), reset_hearth)
+            .add_systems(
+                Update,
+                (
+                    spawn_hearth,
+                    react_to_hits,
+                    flicker,
+                    flash_hearth,
+                    spawn_embers,
+                    rise_embers,
+                )
+                    .chain(),
+            );
+    }
+}
+
+/// The hearth's hit points.
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub struct HearthHealth {
+    pub hp: u32,
+    pub max: u32,
+}
+
+impl Default for HearthHealth {
+    fn default() -> Self {
+        Self {
+            hp: HEARTH_HP,
+            max: HEARTH_HP,
+        }
+    }
+}
+
+impl HearthHealth {
+    pub fn damage(&mut self, amount: u32) {
+        self.hp = self.hp.saturating_sub(amount);
+    }
+
+    /// The fire is out: the run is over.
+    pub fn is_out(&self) -> bool {
+        self.hp == 0
+    }
+
+    /// How big the fire burns, from 1 at full health down to [`LOWEST_FIRE`], and 0 once out.
+    pub fn fire_size(&self) -> f32 {
+        if self.is_out() {
+            0.0
+        } else {
+            LOWEST_FIRE + (1.0 - LOWEST_FIRE) * self.hp as f32 / self.max.max(1) as f32
+        }
+    }
+}
+
+/// A slime got into the hearth at this spot.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct HearthHit {
+    pub at: Vec3,
+}
+
+/// How the fire burns right now: its size (following the hearth's health), a flare after hits,
+/// and a red flash on the stones.
+#[derive(Resource, Debug)]
+struct Fire {
+    size: f32,
+    flare: f32,
+    flash: f32,
+}
+
+impl Default for Fire {
+    fn default() -> Self {
+        Self {
+            size: 1.0,
+            flare: 0.0,
+            flash: 0.0,
+        }
     }
 }
 
@@ -57,6 +149,8 @@ struct FireAssets {
     outer: Handle<StandardMaterial>,
     core: Handle<StandardMaterial>,
     ember: Handle<StandardMaterial>,
+    /// The hearth's own copy of the voxel material, so it can flash when hit.
+    stones: Handle<StandardMaterial>,
 }
 
 impl FromWorld for FireAssets {
@@ -73,11 +167,21 @@ impl FromWorld for FireAssets {
                 ..default()
             })
         };
+        let outer = glowing(palette::FLAME_OUTER, 1.2);
+        let core = glowing(palette::FLAME_CORE, 2.1);
+        let ember = glowing(palette::EMBER_BED, 1.2);
+        let voxel = world.resource::<VoxelMaterial>().0.clone();
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        let stones = materials
+            .get(&voxel)
+            .cloned()
+            .expect("the voxel material exists");
         Self {
             cube,
-            outer: glowing(palette::FLAME_OUTER, 1.2),
-            core: glowing(palette::FLAME_CORE, 2.1),
-            ember: glowing(palette::EMBER_BED, 1.2),
+            outer,
+            core,
+            ember,
+            stones: materials.add(stones),
         }
     }
 }
@@ -86,7 +190,6 @@ fn spawn_hearth(
     mut commands: Commands,
     tiles: Query<(Entity, &Tile, Option<&Tween>), Added<Tile>>,
     fire: Res<FireAssets>,
-    material: Res<VoxelMaterial>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     for (tile, _, drop) in tiles
@@ -99,7 +202,7 @@ fn spawn_hearth(
             .spawn((
                 Hearth,
                 Mesh3d(meshes.add(hearth_mesh().build())),
-                MeshMaterial3d(material.0.clone()),
+                MeshMaterial3d(fire.stones.clone()),
                 pop.start_transform(),
                 Visibility::Hidden,
                 pop,
@@ -248,27 +351,121 @@ fn wobble(t: f32, phase: f32) -> f32 {
         .clamp(-1.0, 1.0)
 }
 
+/// Slimes getting in: the hearth shakes and flashes, the fire flares and spits, and the camera
+/// shakes. Harder when the fire goes out.
+fn react_to_hits(
+    mut commands: Commands,
+    mut hits: MessageReader<HearthHit>,
+    health: Res<HearthHealth>,
+    mut fire: ResMut<Fire>,
+    mut shake: ResMut<Shake>,
+    hearths: Query<(Entity, &Transform, &GlobalTransform, Option<&Wobble>), With<Hearth>>,
+    mut particles: Particles,
+    mut popups: MessageWriter<Popup>,
+) {
+    for hit in hits.read() {
+        fire.flare = HIT_FLARE;
+        fire.flash = FLASH_TIME;
+        shake.add(HIT_SHAKE);
+        popups.write(Popup::problem(hit.at + Vec3::Y * 0.4, "-1"));
+        for (entity, transform, global, wobble) in &hearths {
+            let away = (global.translation() - hit.at).with_y(0.0);
+            let axis = Vec3::Y.cross(away).normalize_or(Vec3::X);
+            commands
+                .entity(entity)
+                .insert(Wobble::new(wobble, transform, axis, 0.18));
+            let top = global.translation() + Vec3::Y * 0.3;
+            particles.burst(
+                &mut commands,
+                top,
+                Burst {
+                    colors: &[
+                        palette::FLAME_OUTER,
+                        palette::FLAME_CORE,
+                        palette::EMBER_BED,
+                    ],
+                    count: 10,
+                    size: 0.05,
+                    spread: 1.2,
+                    lift: 2.8,
+                    lifetime: 0.7,
+                },
+            );
+            if health.is_out() {
+                shake.add(OUT_SHAKE);
+                particles.burst(
+                    &mut commands,
+                    top,
+                    Burst {
+                        colors: &[palette::STONE, palette::STONE_DEEP, palette::CLOUD_SHADE],
+                        count: 24,
+                        size: 0.08,
+                        spread: 1.6,
+                        lift: 3.2,
+                        lifetime: 1.2,
+                    },
+                );
+            }
+        }
+    }
+}
+
 fn flicker(
     time: Res<Time>,
+    health: Res<HearthHealth>,
+    mut fire: ResMut<Fire>,
     mut flames: Query<(&Flame, &mut Transform)>,
     mut lights: Query<&mut PointLight, With<Firelight>>,
 ) {
     let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    fire.size = fire
+        .size
+        .lerp(health.fire_size(), 1.0 - (-FIRE_RATE * dt).exp());
+    fire.flare = (fire.flare - FLARE_DECAY * dt).max(0.0);
+    // A dying fire goes out entirely rather than lingering as a speck.
+    let size = if health.is_out() && fire.size < 0.05 {
+        0.0
+    } else {
+        fire.size + fire.flare
+    };
     for (flame, mut transform) in &mut flames {
         let w = wobble(t, flame.phase);
         let stretch = 1.0 + 0.18 * w;
-        transform.scale = flame.size * Vec3::new(1.0 - 0.08 * w, stretch, 1.0 - 0.08 * w);
+        let flame_size = flame.size * size.max(0.01);
+        transform.scale = flame_size * Vec3::new(1.0 - 0.08 * w, stretch, 1.0 - 0.08 * w);
         // Keep the flame's base in place while it stretches, plus a tiny sway.
         let sway = Vec3::new(
             wobble(t * 0.7, flame.phase + 3.0),
             0.0,
             wobble(t * 0.6, flame.phase + 5.0),
         );
-        transform.translation =
-            flame.rest + Vec3::Y * (stretch - 1.0) * flame.size.y * 0.5 + sway * 0.12 * VOXEL;
+        // A smaller fire shrinks down into the pit. Each flame stretches up from its base.
+        let pit = Vec3::Y * PLATFORM_TOP * VOXEL;
+        transform.translation = pit
+            + (flame.rest - pit) * size
+            + Vec3::Y * (stretch - 1.0) * flame_size.y * 0.5
+            + sway * 0.12 * VOXEL;
     }
     for mut light in &mut lights {
-        light.intensity = FIRELIGHT_INTENSITY * (1.0 + 0.12 * wobble(t * 1.3, 0.0));
+        light.intensity = FIRELIGHT_INTENSITY * size * (1.0 + 0.12 * wobble(t * 1.3, 0.0));
+    }
+}
+
+/// The hearth's stones glow red for a moment after a hit.
+fn flash_hearth(
+    time: Res<Time>,
+    mut fire: ResMut<Fire>,
+    assets: Res<FireAssets>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if fire.flash <= 0.0 {
+        return;
+    }
+    fire.flash = (fire.flash - time.delta_secs()).max(0.0);
+    let k = fire.flash / FLASH_TIME;
+    if let Some(mut material) = materials.get_mut(&assets.stones) {
+        material.emissive = palette::PROBLEM.to_linear() * (1.6 * k * k);
     }
 }
 
@@ -279,8 +476,14 @@ fn spawn_embers(
     mut rng: Local<Option<Rng>>,
     hearths: Query<&GlobalTransform, (With<Hearth>, Without<Tween>)>,
     fire: Res<FireAssets>,
+    burning: Res<Fire>,
 ) {
-    *cooldown -= time.delta_secs();
+    // Fewer embers from a small fire, a burst of them from a flare, none once it's out.
+    let strength = burning.size + burning.flare * 3.0;
+    if strength < 0.05 {
+        return;
+    }
+    *cooldown -= time.delta_secs() * strength;
     if *cooldown > 0.0 {
         return;
     }
@@ -309,6 +512,11 @@ fn spawn_embers(
     }
 }
 
+fn reset_hearth(mut health: ResMut<HearthHealth>, mut fire: ResMut<Fire>) {
+    *health = HearthHealth::default();
+    *fire = Fire::default();
+}
+
 fn rise_embers(
     mut commands: Commands,
     time: Res<Time>,
@@ -329,5 +537,23 @@ fn rise_embers(
         );
         transform.translation += (Vec3::Y * 0.45 + sway * 0.12) * dt;
         transform.scale = Vec3::splat(ember.size * (1.0 - life));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fire_burns_lower_as_the_hearth_is_hurt() {
+        let mut health = HearthHealth { hp: 4, max: 4 };
+        assert_eq!(health.fire_size(), 1.0);
+        health.damage(3);
+        assert!(!health.is_out());
+        assert!((health.fire_size() - (LOWEST_FIRE + (1.0 - LOWEST_FIRE) / 4.0)).abs() < 1e-6);
+        health.damage(5);
+        assert_eq!(health.hp, 0);
+        assert!(health.is_out());
+        assert_eq!(health.fire_size(), 0.0);
     }
 }

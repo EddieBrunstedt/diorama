@@ -15,6 +15,7 @@ mod keeper;
 mod palette;
 mod phase;
 mod rng;
+mod slimes;
 mod towers;
 mod tuning;
 mod ui;
@@ -38,6 +39,7 @@ fn main() {
             island::IslandPlugin,
             hearth::HearthPlugin,
             towers::TowersPlugin,
+            slimes::SlimesPlugin,
             phase::PhasePlugin,
             keeper::KeeperPlugin,
             ui::UiPlugin,

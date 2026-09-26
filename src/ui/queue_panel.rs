@@ -9,7 +9,7 @@ use super::icons::Icons;
 use super::timeline::{TRACK_ROW_HEIGHT, spawn_track};
 use super::{
     FlashOrder, OrderFinished, duration_text, font, format_seconds, order_color, order_title,
-    paper, problem_text, wood_label,
+    paper, problem_color, problem_text, wood_label,
 };
 use crate::keeper::{Backpack, Keeper, OrderId, OrderKind, OrderQueue, Plan, Timeline};
 use crate::palette;
@@ -525,6 +525,7 @@ pub(super) fn animate_cards(
     keeper: Query<&Keeper>,
     mut cards: Query<CardVisuals>,
     mut parts: Query<&mut Node, Without<Card>>,
+    mut badges: Query<&mut BackgroundColor, Without<Card>>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
     mut icons: Query<&mut ImageNode>,
 ) {
@@ -611,21 +612,26 @@ pub(super) fn animate_cards(
 
         // Style from the plan.
         let planned = plan.get(card.id);
-        let problem = planned.is_some_and(|planned| planned.problem.is_some());
+        let flagged = planned.and_then(|planned| planned.problem);
+        let problem = flagged.is_some();
+        let held = flagged.is_some_and(|problem| problem.holds());
         let is_started = started == Some(card.id);
-        background.set_if_neq(BackgroundColor(if problem {
-            palette::UI_PROBLEM_PAPER
-        } else {
-            palette::UI_PAPER
+        background.set_if_neq(BackgroundColor(match flagged {
+            Some(problem) if problem.holds() => palette::UI_PAPER.mix(&palette::SLIME, 0.18),
+            Some(_) => palette::UI_PROBLEM_PAPER,
+            None => palette::UI_PAPER,
         }));
-        border.set_if_neq(BorderColor::all(if problem || late {
-            palette::PROBLEM
-        } else {
-            order_color(&card.kind)
+        border.set_if_neq(BorderColor::all(match flagged {
+            Some(problem) => problem_color(problem),
+            None if late => palette::PROBLEM,
+            None => order_color(&card.kind),
         }));
-        // Late orders fade a little: they're still queued, just not before the wave.
+        if let (Some(problem), Ok(mut badge)) = (flagged, badges.get_mut(card.parts.badge)) {
+            badge.set_if_neq(BackgroundColor(problem_color(problem)));
+        }
+        // Late and waiting orders fade a little: they're still queued, just not happening now.
         if let Ok(mut icon) = icons.get_mut(card.parts.icon) {
-            let alpha = if late { 0.55 } else { 1.0 };
+            let alpha = if late || held { 0.55 } else { 1.0 };
             if icon.color.alpha() != alpha {
                 icon.color = Color::WHITE.with_alpha(alpha);
             }
@@ -688,7 +694,7 @@ pub(super) fn update_tooltip(
     backpack: Res<Backpack>,
     cards: Query<&Card>,
     tooltip: Single<(&Tooltip, &mut Node)>,
-    mut texts: Query<&mut Text>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     let (tooltip, mut node) = tooltip.into_inner();
     let hovered = cards
@@ -728,16 +734,22 @@ pub(super) fn update_tooltip(
                 .map(|_| "Won't be done before the wave".to_string())
         })
         .unwrap_or_default();
+    let problem_color = planned
+        .and_then(|planned| planned.problem)
+        .map_or(palette::PROBLEM, problem_color);
     for (entity, text) in [
         (tooltip.title, title),
         (tooltip.time, time),
         (tooltip.problem, problem),
     ] {
-        if let Ok(mut current) = texts.get_mut(entity)
+        if let Ok((mut current, _)) = texts.get_mut(entity)
             && current.0 != text
         {
             current.0 = text;
         }
+    }
+    if let Ok((_, mut color)) = texts.get_mut(tooltip.problem) {
+        color.set_if_neq(TextColor(problem_color));
     }
 }
 

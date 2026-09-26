@@ -1,13 +1,16 @@
-//! Heads-up bits: the wood counter, popups over the island, numbered markers over order targets,
-//! and a label at the cursor saying what a click would do.
+//! Heads-up bits: the wood and hearth counters, popups over the island, numbered markers over
+//! order targets, and a label at the cursor saying what a click would do.
 
 use super::icons::Icons;
-use super::{Popup, font, format_seconds, order_color, order_title, paper, wood_label};
+use super::{
+    Popup, font, format_seconds, order_color, order_title, paper, problem_color, wood_label,
+};
 use crate::camera::DioramaCamera;
 use crate::dev::ScriptedCursor;
+use crate::hearth::HearthHealth;
 use crate::keeper::{
-    Aim, AimPreview, Backpack, IncomingLog, OrderId, OrderKind, OrderQueue, Plan, Timeline,
-    cursor_position, shown_wood,
+    Aim, AimPreview, Backpack, IncomingLog, OrderId, OrderKind, OrderQueue, Plan, Problem,
+    Timeline, cursor_position, shown_wood,
 };
 use crate::palette;
 use bevy::prelude::*;
@@ -18,6 +21,10 @@ const POPUP_LIFETIME: f32 = 1.2;
 const POPUP_RISE: f32 = 46.0;
 const POPUP_WIDTH: f32 = 260.0;
 const PUNCH_TIME: f32 = 0.35;
+/// The hearth counter shakes for this long when the hearth is hit.
+const HURT_TIME: f32 = 0.5;
+/// At this many hit points or fewer the hearth counter turns red.
+const LOW_HEARTH: u32 = 3;
 const MARKER_SIZE: f32 = 24.0;
 /// Height above an order's target where its numbered marker floats.
 const CHOP_MARKER_HEIGHT: f32 = 0.85;
@@ -28,6 +35,13 @@ const WALK_MARKER_HEIGHT: f32 = 0.3;
 pub(super) struct WoodCounter {
     shown: Option<u32>,
     punch: f32,
+    text: Entity,
+}
+
+#[derive(Component)]
+pub(super) struct HearthCounter {
+    shown: Option<u32>,
+    hurt: f32,
     text: Entity,
 }
 
@@ -92,6 +106,48 @@ pub(super) fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
     counter.insert(WoodCounter {
         shown: None,
         punch: 0.0,
+        text,
+    });
+
+    let mut hearth = commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(24.0),
+            top: Val::Px(86.0),
+            padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(14.0)),
+            column_gap: Val::Px(10.0),
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        paper(14.0),
+        UiTransform::IDENTITY,
+        Pickable::IGNORE,
+    ));
+    hearth.with_child((
+        ImageNode::new(icons.hearth.clone()),
+        Node {
+            width: Val::Px(36.0),
+            height: Val::Px(36.0),
+            ..default()
+        },
+        Pickable::IGNORE,
+    ));
+    let mut text = Entity::PLACEHOLDER;
+    hearth.with_children(|hearth| {
+        text = hearth
+            .spawn((
+                Text::default(),
+                font(26.0),
+                TextColor(palette::UI_INK),
+                Pickable::IGNORE,
+            ))
+            .id();
+    });
+    hearth.insert(HearthCounter {
+        shown: None,
+        hurt: 0.0,
         text,
     });
 
@@ -175,6 +231,41 @@ pub(super) fn update_wood_counter(
     // A quick swell that wobbles back down.
     let scale = 1.0 + 0.35 * k * (k * 9.0).cos().abs();
     transform.set_if_neq(UiTransform::from_scale(Vec2::splat(scale)));
+}
+
+/// The hearth's hit points. Shakes and flashes red when a slime gets in.
+pub(super) fn update_hearth_counter(
+    time: Res<Time>,
+    health: Res<HearthHealth>,
+    counter: Single<(&mut HearthCounter, &mut UiTransform, &mut BorderColor)>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
+) {
+    let (mut counter, mut transform, mut border) = counter.into_inner();
+    if counter.shown != Some(health.hp) {
+        if counter.shown.is_some_and(|shown| health.hp < shown) {
+            counter.hurt = HURT_TIME;
+        }
+        counter.shown = Some(health.hp);
+        if let Ok((mut text, mut color)) = texts.get_mut(counter.text) {
+            text.0 = format!("{}/{}", health.hp, health.max);
+            color.0 = if health.hp <= LOW_HEARTH {
+                palette::PROBLEM
+            } else {
+                palette::UI_INK
+            };
+        }
+    }
+    counter.hurt = (counter.hurt - time.delta_secs()).max(0.0);
+    let k = counter.hurt / HURT_TIME;
+    let t = time.elapsed_secs();
+    transform.set_if_neq(UiTransform {
+        translation: Val2::new(Val::Px(6.0 * k * (t * 55.0).sin()), Val::Px(0.0)),
+        scale: Vec2::splat(1.0 + 0.2 * k),
+        rotation: Rot2::radians(0.06 * k * (t * 40.0).sin()),
+    });
+    border.set_if_neq(BorderColor::all(
+        palette::UI_PAPER_DARK.mix(&palette::PROBLEM, k),
+    ));
 }
 
 pub(super) fn spawn_popups(mut commands: Commands, mut popups: MessageReader<Popup>) {
@@ -335,11 +426,9 @@ pub(super) fn update_markers(
             node.left = Val::Px(screen.x - MARKER_SIZE / 2.0);
             node.top = Val::Px(screen.y - MARKER_SIZE / 2.0);
         }
-        let color = if planned.problem.is_some() {
-            palette::PROBLEM
-        } else {
-            order_color(&planned.order.kind)
-        };
+        let color = planned
+            .problem
+            .map_or(order_color(&planned.order.kind), problem_color);
         background.set_if_neq(BackgroundColor(color));
         // A red ring on orders that won't be done before the wave.
         let late = timeline.slots.get(index).is_some_and(|slot| slot.late);
@@ -382,7 +471,7 @@ pub(super) fn update_cursor_label(
     preview: Res<AimPreview>,
     backpack: Res<Backpack>,
     label: Single<(&CursorLabel, &mut Node, &ComputedNode)>,
-    mut texts: Query<&mut Text>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     let (label, mut node, computed) = label.into_inner();
     let cursor = cursor_position(&window, scripted.as_deref());
@@ -409,6 +498,7 @@ pub(super) fn update_cursor_label(
         .filter(|(planned, _)| planned.problem.is_none())
         .map(|(_, slot)| format!("Takes {}", format_seconds(slot.seconds())))
         .unwrap_or_default();
+    let mut warning_color = palette::PROBLEM;
     let (title, warning) = if let Some(existing) = queue.find_same_target(&target.kind) {
         let number = queue.index_of(existing).map_or(0, |index| index + 1);
         (format!("Already order {number}"), String::new())
@@ -434,15 +524,19 @@ pub(super) fn update_cursor_label(
         let warning = if queue.is_full() {
             "Too many orders".to_string()
         } else {
-            match then.problem(&target.kind) {
-                Some(crate::keeper::Problem::NotEnoughWood) => {
+            let problem = preview
+                .and_then(|(planned, _)| planned.problem)
+                .or_else(|| then.problem(&target.kind));
+            if let Some(problem) = problem {
+                warning_color = problem_color(problem);
+            }
+            match problem {
+                Some(Problem::NotEnoughWood) => {
                     format!("Not enough wood yet (will have {wood_then})")
                 }
-                Some(crate::keeper::Problem::BackpackFull) => "Backpack will be full".to_string(),
-                _ => match preview {
-                    Some((planned, _)) if planned.problem.is_some() => {
-                        crate::keeper::Problem::Unreachable.message().into()
-                    }
+                Some(Problem::BackpackFull) => "Backpack will be full".to_string(),
+                Some(problem) => problem.message().to_string(),
+                None => match preview {
                     Some((_, slot)) if slot.late => "Won't be done before the wave".into(),
                     _ => String::new(),
                 },
@@ -455,10 +549,13 @@ pub(super) fn update_cursor_label(
         (label.time, time),
         (label.warning, warning),
     ] {
-        if let Ok(mut current) = texts.get_mut(entity)
+        if let Ok((mut current, _)) = texts.get_mut(entity)
             && current.0 != text
         {
             current.0 = text;
         }
+    }
+    if let Ok((_, mut color)) = texts.get_mut(label.warning) {
+        color.set_if_neq(TextColor(warning_color));
     }
 }

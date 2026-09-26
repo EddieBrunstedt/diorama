@@ -28,5 +28,31 @@ pub const PREPARE_SECONDS: f32 = 30.0;
 /// Bonus coin per second left on the prepare timer when the bell is rung.
 /// (Coin isn't spent on anything yet; the bonus is only shown.)
 pub const BELL_COINS_PER_SECOND: f32 = 1.0;
-/// How long a wave lasts until milestone 4 adds slimes. Placeholder.
-pub const PLACEHOLDER_WAVE_SECONDS: f32 = 4.0;
+
+/// The hearth's hit points. The run is over when they're gone.
+pub const HEARTH_HP: u32 = 10;
+/// Damage a slime does when it reaches the hearth.
+pub const SLIME_DAMAGE: u32 = 1;
+
+/// Slimes in wave 1, and how many more each later wave brings.
+pub const SLIMES_FIRST_WAVE: u32 = 4;
+pub const SLIMES_PER_WAVE: u32 = 2;
+/// Slime hit points in wave 1, and how many waves it takes for slimes to gain one more.
+pub const SLIME_HP_FIRST_WAVE: u32 = 2;
+pub const WAVES_PER_SLIME_HP: u32 = 2;
+/// Seconds between slimes in wave 1, how much shorter it gets each wave, and the shortest it gets.
+pub const SLIME_INTERVAL_FIRST_WAVE: f32 = 1.5;
+pub const SLIME_INTERVAL_PER_WAVE: f32 = 0.08;
+pub const SLIME_INTERVAL_MIN: f32 = 0.6;
+/// Seconds from the start of a wave until the first slime shows up.
+pub const FIRST_SLIME_DELAY: f32 = 1.2;
+/// Slime speed along the road, in tiles per second (averaged over its hops).
+pub const SLIME_SPEED: f32 = 0.5;
+
+/// How far a tower shoots, in tiles from its middle.
+pub const TOWER_RANGE: f32 = 1.8;
+/// Seconds between a tower's shots.
+pub const TOWER_COOLDOWN: f32 = 0.8;
+pub const TOWER_DAMAGE: u32 = 1;
+/// Arrow speed in tiles per second.
+pub const ARROW_SPEED: f32 = 5.0;

@@ -1,13 +1,19 @@
-//! Towers: construction sites while the keeper builds, finished towers dropping into place, and
-//! see-through ghosts where towers are planned.
+//! Towers: construction sites while the keeper builds, finished towers dropping into place,
+//! see-through ghosts where towers are planned, and shooting slimes during the wave
+//! ([`shooting`], with the choice of target in [`aim`]).
+
+pub mod aim;
+mod shooting;
 
 use crate::island::cell_to_world;
 use crate::juice::{Burst, Particles, Squash, Tween};
 use crate::palette;
+use crate::phase::GameState;
 use crate::rng::Rng;
 use crate::voxel::{VoxelMaterial, VoxelMesh, shade, vary};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
+use shooting::{Archer, Arrow};
 
 /// How high a finished tower drops from.
 const DROP_HEIGHT: f32 = 1.4;
@@ -26,7 +32,16 @@ impl Plugin for TowersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelMaterial>()
             .init_resource::<TowerAssets>()
-            .add_systems(Update, (land_towers, bob_ghosts));
+            .add_systems(OnExit(GameState::GameOver), clear_towers)
+            .add_systems(
+                Update,
+                (
+                    land_towers,
+                    bob_ghosts,
+                    shooting::shoot.run_if(in_state(GameState::Wave)),
+                    shooting::fly_arrows,
+                ),
+            );
     }
 }
 
@@ -61,6 +76,8 @@ pub struct TowerAssets {
     ghost: Handle<Mesh>,
     ghost_ok: Handle<StandardMaterial>,
     ghost_problem: Handle<StandardMaterial>,
+    arrow: Handle<Mesh>,
+    voxel: Handle<StandardMaterial>,
 }
 
 impl FromWorld for TowerAssets {
@@ -68,9 +85,11 @@ impl FromWorld for TowerAssets {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         let tower = meshes.add(tower_mesh().build());
         let site = meshes.add(site_mesh().build());
+        let arrow = meshes.add(shooting::arrow_mesh().build());
         let mut ghost = tower_mesh().build();
         ghost.remove_attribute(Mesh::ATTRIBUTE_COLOR);
         let ghost = meshes.add(ghost);
+        let voxel = world.resource::<VoxelMaterial>().0.clone();
         // Solid, softly glowing blueprints: see-through ghosts of a mesh made of overlapping
         // boxes show every inner face and turn into a smear.
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
@@ -89,6 +108,8 @@ impl FromWorld for TowerAssets {
             ghost,
             ghost_ok: blueprint(palette::BLUEPRINT),
             ghost_problem: blueprint(palette::BLUEPRINT_PROBLEM),
+            arrow,
+            voxel,
         }
     }
 }
@@ -151,7 +172,9 @@ pub fn finish_site(
             ChildOf(root),
         ))
         .id();
-    commands.entity(root).insert(Landing { body });
+    commands
+        .entity(root)
+        .insert((Landing { body }, Archer::new(body)));
 }
 
 /// A ghost tower on `cell`, red if the plan says it can't be built. Pops in from nothing.
@@ -203,6 +226,16 @@ fn land_towers(
                 lifetime: 0.7,
             },
         );
+    }
+}
+
+/// Clears the old run's towers, building sites and arrows.
+fn clear_towers(
+    mut commands: Commands,
+    towers: Query<Entity, Or<(With<Tower>, With<BuildSite>, With<Arrow>)>>,
+) {
+    for entity in &towers {
+        commands.entity(entity).despawn();
     }
 }
 

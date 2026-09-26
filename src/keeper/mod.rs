@@ -22,7 +22,7 @@ pub use timeline::Slot;
 
 use crate::island::{Island, Tree, TreeId};
 use crate::juice::{Squash, Tween};
-use crate::phase::{GameState, PrepareClock, wave_deadline};
+use crate::phase::{GameState, PrepareClock, building_allowed, wave_deadline};
 use crate::towers::{BuildSite, Tower};
 use crate::voxel::{VOXEL, VoxelMaterial};
 use bevy::prelude::*;
@@ -53,13 +53,19 @@ impl Plugin for KeeperPlugin {
             .init_resource::<Aim>()
             .init_resource::<VoxelMaterial>()
             .init_resource::<KeeperAssets>()
-            .add_systems(Startup, (spawn_keeper, input::spawn_aim_marker))
+            .add_systems(Startup, input::spawn_aim_marker)
+            .add_systems(OnEnter(GameState::Intro), spawn_keeper)
+            .add_systems(OnExit(GameState::GameOver), clear_keeper)
             .add_systems(
                 Update,
                 (
-                    (input::aim, input::give_orders).chain(),
+                    (
+                        input::aim,
+                        input::give_orders.run_if(not(in_state(GameState::GameOver))),
+                    )
+                        .chain(),
                     update_nav,
-                    work::carry_out_orders,
+                    work::carry_out_orders.run_if(not(in_state(GameState::GameOver))),
                     update_plan,
                     update_timeline,
                     preview_aim,
@@ -235,7 +241,8 @@ impl TreeLookup for TreeIndex {
 #[derive(Resource, Default)]
 pub struct Plan {
     pub orders: Vec<PlannedOrder>,
-    progress: Option<Progress>,
+    /// What the plan was made for: the keeper's progress, and whether building was allowed.
+    planned_for: Option<(Progress, bool)>,
 }
 
 impl Plan {
@@ -354,6 +361,20 @@ fn spawn_keeper(mut commands: Commands, assets: Res<KeeperAssets>, material: Res
         });
 }
 
+/// Clears the old run: the keeper, his orders and his wood.
+fn clear_keeper(
+    mut commands: Commands,
+    keeper: Query<Entity, With<Keeper>>,
+    mut queue: ResMut<OrderQueue>,
+    mut backpack: ResMut<Backpack>,
+) {
+    for entity in &keeper {
+        commands.entity(entity).despawn();
+    }
+    queue.clear();
+    *backpack = Backpack::default();
+}
+
 /// Rebuilds the walkable ground and the tree index from what's on the island.
 fn update_nav(
     island: Res<Island>,
@@ -385,20 +406,25 @@ fn update_plan(
     backpack: Res<Backpack>,
     nav: Res<NavGrid>,
     trees: Res<TreeIndex>,
+    state: Res<State<GameState>>,
     keeper: Query<(&Keeper, &Transform)>,
     mut plan: ResMut<Plan>,
 ) {
     let Ok((keeper, transform)) = keeper.single() else {
         return;
     };
-    let progress = progress(keeper, transform, &queue);
+    let planned_for = (
+        progress(keeper, transform, &queue),
+        building_allowed(*state.get()),
+    );
     let changed =
         queue.is_changed() || backpack.is_changed() || nav.is_changed() || trees.is_changed();
-    if !changed && plan.progress == Some(progress) {
+    if !changed && plan.planned_for == Some(planned_for) {
         return;
     }
-    plan.orders = route::plan(queue.orders(), progress, &backpack, &nav, &*trees);
-    plan.progress = Some(progress);
+    let (progress, building) = planned_for;
+    plan.orders = route::plan(queue.orders(), progress, &backpack, building, &nav, &*trees);
+    plan.planned_for = Some(planned_for);
 }
 
 /// Where the keeper is in carrying out the queue, for planning.
@@ -450,6 +476,7 @@ fn preview_aim(
     backpack: Res<Backpack>,
     nav: Res<NavGrid>,
     trees: Res<TreeIndex>,
+    state: Res<State<GameState>>,
     keeper: Query<(&Keeper, &Transform)>,
     mut preview: ResMut<AimPreview>,
 ) {
@@ -474,6 +501,7 @@ fn preview_aim(
         &orders,
         progress(keeper, transform, &queue),
         &backpack,
+        building_allowed(*state.get()),
         &nav,
         &*trees,
     );
