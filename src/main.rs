@@ -13,6 +13,7 @@ mod island;
 mod juice;
 mod keeper;
 mod palette;
+mod phase;
 mod rng;
 mod towers;
 mod tuning;
@@ -37,6 +38,7 @@ fn main() {
             island::IslandPlugin,
             hearth::HearthPlugin,
             towers::TowersPlugin,
+            phase::PhasePlugin,
             keeper::KeeperPlugin,
             ui::UiPlugin,
             juice::JuicePlugin,

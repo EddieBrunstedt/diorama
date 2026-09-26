@@ -8,7 +8,10 @@
 //! when he gets to them, so the plan and what actually happens always agree.
 
 use crate::island::TreeId;
-use crate::tuning::{BACKPACK_CAPACITY, MAX_ORDERS, STARTING_WOOD, TOWER_WOOD_COST, WOOD_PER_TREE};
+use crate::tuning::{
+    BACKPACK_CAPACITY, BUILD_SECONDS, CHOP_SECONDS, MAX_ORDERS, STARTING_WOOD, TOWER_WOOD_COST,
+    WOOD_PER_TREE,
+};
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -40,6 +43,15 @@ impl OrderKind {
             OrderKind::Chop(_) => WOOD_PER_TREE as i32,
             OrderKind::Build(_) => -(TOWER_WOOD_COST as i32),
             OrderKind::Walk(_) => 0,
+        }
+    }
+
+    /// Seconds of work once the keeper has walked there.
+    pub fn work_seconds(&self) -> f32 {
+        match self {
+            OrderKind::Chop(_) => CHOP_SECONDS,
+            OrderKind::Build(_) => BUILD_SECONDS,
+            OrderKind::Walk(_) => 0.0,
         }
     }
 }
@@ -154,6 +166,25 @@ impl OrderQueue {
     /// Adds an order to be done next, right behind the started order. `None` if the queue is full.
     pub fn push_front(&mut self, kind: OrderKind) -> Option<OrderId> {
         self.insert(self.first_free_index(), kind)
+    }
+
+    /// Where a new order would go: next (right behind the started order) or at the end.
+    pub fn insert_index(&self, next: bool) -> usize {
+        if next {
+            self.first_free_index()
+        } else {
+            self.orders.len()
+        }
+    }
+
+    /// The orders as they'd be with `kind` added (see [`Self::insert_index`]), for previewing an
+    /// order before it's given. Returns the orders and the new one's index.
+    pub fn with_candidate(&self, kind: OrderKind, next: bool) -> (Vec<Order>, usize) {
+        let index = self.insert_index(next);
+        let mut orders = self.orders.clone();
+        let id = OrderId(self.next_id);
+        orders.insert(index, Order { id, kind });
+        (orders, index)
     }
 
     fn insert(&mut self, index: usize, kind: OrderKind) -> Option<OrderId> {
@@ -311,6 +342,22 @@ mod tests {
         assert!(queue.is_full());
         assert_eq!(queue.push(OrderKind::Walk(Vec2::ZERO)), None);
         assert_eq!(queue.push_front(OrderKind::Walk(Vec2::ZERO)), None);
+    }
+
+    #[test]
+    fn candidates_go_where_a_click_would_put_them() {
+        let mut queue = OrderQueue::default();
+        queue.push(tree(0));
+        queue.push(tree(1));
+        queue.start();
+        let (orders, index) = queue.with_candidate(build(), true);
+        assert_eq!(index, 1);
+        assert_eq!(orders[1].kind, build());
+        let (orders, index) = queue.with_candidate(build(), false);
+        assert_eq!((orders.len(), index), (3, 2));
+        assert_eq!(queue.orders().len(), 2, "the queue itself is unchanged");
+        let candidate = orders[index].id;
+        assert!(queue.orders().iter().all(|order| order.id != candidate));
     }
 
     #[test]

@@ -1,12 +1,15 @@
-//! The on-screen UI: the order queue, the wood counter, numbered markers over order targets, a
-//! label at the cursor, and popups rising from the island.
+//! The on-screen UI: the order queue and its timeline, the prepare clock and the bell, the wood
+//! counter, numbered markers over order targets, a label at the cursor, and popups and banners.
 
+mod clock;
 mod hud;
 mod icons;
 mod queue_panel;
+mod timeline;
 
 use crate::keeper::{OrderId, OrderKind, PlanSystems, PlannedOrder, Problem};
 use crate::palette;
+use crate::phase::GameState;
 use crate::tuning::TOWER_WOOD_COST;
 use bevy::prelude::*;
 
@@ -18,13 +21,24 @@ impl Plugin for UiPlugin {
             .add_message::<FlashOrder>()
             .add_message::<OrderFinished>()
             .init_resource::<icons::Icons>()
-            .add_systems(Startup, (hud::spawn_hud, queue_panel::spawn_panel))
+            .add_systems(
+                Startup,
+                (hud::spawn_hud, queue_panel::spawn_panel, clock::spawn_clock),
+            )
+            .add_systems(OnEnter(GameState::Prepare), clock::announce_prepare)
+            .add_systems(OnEnter(GameState::Wave), clock::announce_wave)
             .add_systems(
                 Update,
                 (
                     queue_panel::sync_cards,
                     queue_panel::animate_cards,
                     queue_panel::update_tooltip,
+                    queue_panel::update_wave_divider,
+                    queue_panel::update_late_note,
+                    timeline::update_track,
+                    clock::update_clock,
+                    clock::update_bell,
+                    clock::animate_banners,
                     hud::update_wood_counter,
                     hud::spawn_popups,
                     hud::animate_popups,
@@ -102,6 +116,27 @@ pub fn problem_text(planned: &PlannedOrder, wood_before: u32) -> Option<String> 
     })
 }
 
+/// A short duration, e.g. "2.5s", or "12s" once it's ten seconds or more.
+pub fn format_seconds(seconds: f32) -> String {
+    let tenths = (seconds.max(0.0) * 10.0).round() / 10.0;
+    if tenths < 10.0 {
+        format!("{tenths:.1}s")
+    } else {
+        format!("{:.0}s", seconds.round())
+    }
+}
+
+/// How long an order takes, e.g. "1.4s walk + 2.0s chop".
+pub fn duration_text(planned: &PlannedOrder) -> String {
+    let walk = format!("{} walk", format_seconds(planned.walk_seconds));
+    let work = match planned.order.kind {
+        OrderKind::Chop(_) => "chop",
+        OrderKind::Build(_) => "build",
+        OrderKind::Walk(_) => return walk,
+    };
+    format!("{walk} + {} {work}", format_seconds(planned.work_seconds))
+}
+
 /// Rounded paper panel styling shared by the HUD.
 fn paper(radius: f32) -> (BackgroundColor, BorderColor, BoxShadow) {
     (
@@ -124,6 +159,14 @@ fn font(size: f32) -> TextFont {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seconds_are_short() {
+        assert_eq!(format_seconds(2.0), "2.0s");
+        assert_eq!(format_seconds(0.26), "0.3s");
+        assert_eq!(format_seconds(9.96), "10s");
+        assert_eq!(format_seconds(12.4), "12s");
+    }
 
     #[test]
     fn wood_labels_are_signed() {

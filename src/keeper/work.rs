@@ -10,7 +10,7 @@ use crate::island::{Felled, Tree};
 use crate::juice::{Burst, Flight, FlightTarget, Landed, Particles, Squash, Tween, Wobble};
 use crate::palette;
 use crate::towers::{BuildSite, TowerAssets, finish_site, spawn_site};
-use crate::tuning::{BUILD_SECONDS, CHOP_SECONDS, KEEPER_SPEED};
+use crate::tuning::KEEPER_SPEED;
 use crate::ui::{OrderFinished, Popup};
 use crate::voxel::{VOXEL, VoxelMaterial};
 use bevy::prelude::*;
@@ -148,11 +148,11 @@ pub(super) fn carry_out_orders(
             } else {
                 let kind = queue.started().map(|started| started.kind);
                 match kind {
-                    Some(OrderKind::Chop(_)) => {
-                        Task::working(order, CHOP_SECONDS, CHOP_SWING, site)
+                    Some(kind @ OrderKind::Chop(_)) => {
+                        Task::working(order, kind.work_seconds(), CHOP_SWING, site)
                     }
-                    Some(OrderKind::Build(_)) => {
-                        Task::working(order, BUILD_SECONDS, HAMMER_SWING, site)
+                    Some(kind @ OrderKind::Build(_)) => {
+                        Task::working(order, kind.work_seconds(), HAMMER_SWING, site)
                     }
                     _ => {
                         finished.write(OrderFinished(order));
@@ -328,7 +328,12 @@ fn finish_order(
 }
 
 impl Task {
-    fn working(order: super::OrderId, duration: f32, swing: f32, site: Option<Entity>) -> Self {
+    pub(super) fn working(
+        order: super::OrderId,
+        duration: f32,
+        swing: f32,
+        site: Option<Entity>,
+    ) -> Self {
         let swings = (duration / swing).round().max(1.0);
         Task::Working {
             order,

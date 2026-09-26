@@ -1,9 +1,11 @@
 //! Planning the keeper's route through the queue, as plain data: where he walks for each order,
-//! which orders he'll have to skip, and how much wood he'll carry along the way.
+//! which orders he'll have to skip, how much wood he'll carry along the way, and how long each
+//! order takes.
 
-use super::nav::{Goal, NavGrid};
+use super::nav::{Goal, NavGrid, path_length};
 use super::queue::{Backpack, Order, OrderKind, Problem, plan_wood};
 use crate::island::TreeId;
+use crate::tuning::KEEPER_SPEED;
 use crate::voxel::TILE_SIZE;
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -60,6 +62,11 @@ pub fn path_for(
     nav.find_path(from, &goal)
 }
 
+/// Seconds it takes the keeper to walk a path.
+pub fn walk_seconds(path: &[Vec2]) -> f32 {
+    path_length(path) / KEEPER_SPEED
+}
+
 /// Updates `nav` for an order that has been carried out. A chopped tree no longer blocks the way.
 /// (A tower already blocks its footprint from the moment the keeper heads to build it.)
 pub fn apply_done(kind: &OrderKind, nav: &mut NavGrid, trees: &impl TreeLookup) {
@@ -83,6 +90,19 @@ pub struct PlannedOrder {
     /// The walk from the previous order to this one. Empty for skipped orders and for the started
     /// order (the keeper is already on his way).
     pub path: Vec<Vec2>,
+    /// Seconds to walk `path`.
+    pub walk_seconds: f32,
+    /// Seconds of chopping or building once he's there. Zero for skipped orders and the started
+    /// order.
+    pub work_seconds: f32,
+}
+
+impl PlannedOrder {
+    /// How long the order takes from the moment the keeper sets off, if he hasn't yet.
+    /// The started order's time left is in [`super::timeline`]'s hands, since it changes as he works.
+    pub fn seconds(&self) -> f32 {
+        self.walk_seconds + self.work_seconds
+    }
 }
 
 /// Where the keeper is in carrying out the queue's first order.
@@ -130,12 +150,22 @@ pub fn plan(
     orders
         .iter()
         .zip(steps)
-        .map(|(order, step)| PlannedOrder {
-            order: *order,
-            problem: step.problem,
-            wood_after: step.wood_after,
-            target: target_point(&order.kind, trees),
-            path: paths.remove(&order.id).unwrap_or_default(),
+        .map(|(order, step)| {
+            let path = paths.remove(&order.id).unwrap_or_default();
+            let work_seconds = if step.problem.is_none() && Some(order.id) != started {
+                order.kind.work_seconds()
+            } else {
+                0.0
+            };
+            PlannedOrder {
+                order: *order,
+                problem: step.problem,
+                wood_after: step.wood_after,
+                target: target_point(&order.kind, trees),
+                walk_seconds: walk_seconds(&path),
+                work_seconds,
+                path,
+            }
         })
         .collect()
 }
@@ -144,8 +174,8 @@ pub fn plan(
 mod tests {
     use super::*;
     use crate::island::Island;
-    use crate::keeper::nav::path_length;
     use crate::keeper::queue::OrderQueue;
+    use crate::tuning::{BUILD_SECONDS, CHOP_SECONDS};
 
     const TREE: TreeId = TreeId {
         cell: IVec2::new(-2, -2),
@@ -306,5 +336,53 @@ mod tests {
         let end = *planned[0].path.last().unwrap();
         assert!(nav.is_walkable(end));
         assert!(end.length() <= WALK_NEAR_REACH);
+    }
+
+    #[test]
+    fn orders_take_walking_plus_working_time() {
+        let (nav, trees) = setup();
+        let walk_to = Vec2::new(-0.6, 1.4);
+        let queue = queue(&[
+            OrderKind::Walk(walk_to),
+            OrderKind::Chop(TREE),
+            OrderKind::Build(IVec2::new(-1, 1)),
+        ]);
+        let planned = plan(
+            queue.orders(),
+            Progress::NotStarted { keeper: START },
+            &backpack(3),
+            &nav,
+            &trees,
+        );
+        // Open ground: a straight walk.
+        let walk = START.distance(walk_to) / KEEPER_SPEED;
+        assert!((planned[0].seconds() - walk).abs() < 1e-4);
+        assert_eq!(planned[0].work_seconds, 0.0);
+        assert_eq!(planned[1].work_seconds, CHOP_SECONDS);
+        assert_eq!(planned[2].work_seconds, BUILD_SECONDS);
+        for step in &planned {
+            assert!((step.walk_seconds - path_length(&step.path) / KEEPER_SPEED).abs() < 1e-4);
+            assert!(step.walk_seconds > 0.0);
+        }
+    }
+
+    #[test]
+    fn skipped_and_started_orders_take_no_planned_time() {
+        let (nav, trees) = setup();
+        let queue = queue(&[OrderKind::Chop(TREE), OrderKind::Build(IVec2::new(-1, 1))]);
+        let planned = plan(
+            queue.orders(),
+            Progress::Started { end: START },
+            &backpack(0),
+            &nav,
+            &trees,
+        );
+        assert_eq!(
+            planned[0].seconds(),
+            0.0,
+            "started: its time left is tracked live"
+        );
+        assert_eq!(planned[1].problem, Some(Problem::NotEnoughWood));
+        assert_eq!(planned[1].seconds(), 0.0);
     }
 }

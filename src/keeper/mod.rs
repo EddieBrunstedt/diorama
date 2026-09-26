@@ -1,8 +1,8 @@
 //! The little guy (the keeper) and his order queue.
 //!
-//! The queue, the wood plan, walking paths and route planning are plain data in [`queue`], [`nav`]
-//! and [`route`]. The rest is the ECS side: clicking to give orders, carrying them out, animation
-//! and showing the planned route on the island.
+//! The queue, the wood plan, walking paths, route planning and timing are plain data in [`queue`],
+//! [`nav`], [`route`] and [`timeline`]. The rest is the ECS side: clicking to give orders, carrying
+//! them out, animation and showing the planned route on the island.
 
 mod anim;
 mod input;
@@ -11,15 +11,18 @@ pub mod nav;
 pub mod queue;
 pub mod route;
 mod route_view;
+pub mod timeline;
 mod work;
 
 pub use anim::shown_wood;
 pub use input::{Aim, cursor_position};
 pub use queue::{Backpack, OrderId, OrderKind, OrderQueue, Problem};
 pub use route::PlannedOrder;
+pub use timeline::Slot;
 
 use crate::island::{Island, Tree, TreeId};
 use crate::juice::{Squash, Tween};
+use crate::phase::{GameState, PrepareClock, wave_deadline};
 use crate::towers::{BuildSite, Tower};
 use crate::voxel::{VOXEL, VoxelMaterial};
 use bevy::prelude::*;
@@ -45,6 +48,8 @@ impl Plugin for KeeperPlugin {
             .init_resource::<NavGrid>()
             .init_resource::<TreeIndex>()
             .init_resource::<Plan>()
+            .init_resource::<Timeline>()
+            .init_resource::<AimPreview>()
             .init_resource::<Aim>()
             .init_resource::<VoxelMaterial>()
             .init_resource::<KeeperAssets>()
@@ -56,6 +61,8 @@ impl Plugin for KeeperPlugin {
                     update_nav,
                     work::carry_out_orders,
                     update_plan,
+                    update_timeline,
+                    preview_aim,
                 )
                     .chain()
                     .in_set(PlanSystems),
@@ -135,6 +142,20 @@ impl Task {
                 elapsed, duration, ..
             } => Some((elapsed / duration).min(1.0)),
             _ => None,
+        }
+    }
+
+    /// Seconds until the order in progress (of this `kind`) is done: the rest of the walk and all
+    /// of the work, or what's left of the work.
+    pub fn seconds_left(&self, position: Vec2, kind: &OrderKind) -> f32 {
+        match self {
+            Task::Idle => 0.0,
+            Task::Walking { .. } => {
+                route::walk_seconds(&self.remaining_path(position)) + kind.work_seconds()
+            }
+            Task::Working {
+                elapsed, duration, ..
+            } => (duration - elapsed).max(0.0),
         }
     }
 
@@ -220,6 +241,56 @@ pub struct Plan {
 impl Plan {
     pub fn get(&self, id: OrderId) -> Option<&PlannedOrder> {
         self.orders.iter().find(|planned| planned.order.id == id)
+    }
+}
+
+/// When each planned order will happen, from now. Rebuilt every frame, since time passes.
+#[derive(Resource, Default)]
+pub struct Timeline {
+    /// One per planned order, in queue order.
+    pub slots: Vec<Slot>,
+    /// Seconds until the wave starts, if there's a prepare deadline.
+    pub deadline: Option<f32>,
+}
+
+impl Timeline {
+    pub fn first_late(&self) -> Option<usize> {
+        timeline::first_late(&self.slots)
+    }
+
+    pub fn late_count(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.late).count()
+    }
+
+    /// When an order inserted at `index` would start: once the orders before it are done.
+    pub fn start_at(&self, index: usize) -> f32 {
+        index
+            .checked_sub(1)
+            .and_then(|previous| self.slots.get(previous))
+            .map_or(0.0, |slot| slot.end)
+    }
+}
+
+/// The order a click would give right now, planned as if it were in the queue.
+#[derive(Resource, Default)]
+pub struct AimPreview {
+    /// The order as planned, and where in the queue it would go.
+    planned: Option<(PlannedOrder, usize)>,
+    /// What the preview was planned for, to replan only when that changes.
+    planned_for: Option<(OrderKind, bool)>,
+}
+
+impl AimPreview {
+    /// The previewed order as planned, and when it would happen on the current timeline.
+    pub fn get(&self, timeline: &Timeline) -> Option<(&PlannedOrder, Slot)> {
+        let (planned, index) = self.planned.as_ref()?;
+        let start = timeline.start_at(*index);
+        let end = start + planned.seconds();
+        let late = planned.problem.is_none()
+            && timeline
+                .deadline
+                .is_some_and(|deadline| timeline::is_late(end, deadline));
+        Some((planned, Slot { start, end, late }))
     }
 }
 
@@ -320,14 +391,7 @@ fn update_plan(
     let Ok((keeper, transform)) = keeper.single() else {
         return;
     };
-    let position = transform.translation.xz();
-    let progress = match (&keeper.task, queue.started()) {
-        (Task::Walking { path, .. }, Some(_)) => Progress::Started {
-            end: *path.last().unwrap_or(&position),
-        },
-        (Task::Working { .. }, Some(_)) => Progress::Started { end: position },
-        _ => Progress::NotStarted { keeper: position },
-    };
+    let progress = progress(keeper, transform, &queue);
     let changed =
         queue.is_changed() || backpack.is_changed() || nav.is_changed() || trees.is_changed();
     if !changed && plan.progress == Some(progress) {
@@ -335,4 +399,124 @@ fn update_plan(
     }
     plan.orders = route::plan(queue.orders(), progress, &backpack, &nav, &*trees);
     plan.progress = Some(progress);
+}
+
+/// Where the keeper is in carrying out the queue, for planning.
+fn progress(keeper: &Keeper, transform: &Transform, queue: &OrderQueue) -> Progress {
+    let position = transform.translation.xz();
+    match (&keeper.task, queue.started()) {
+        (Task::Walking { path, .. }, Some(_)) => Progress::Started {
+            end: *path.last().unwrap_or(&position),
+        },
+        (Task::Working { .. }, Some(_)) => Progress::Started { end: position },
+        _ => Progress::NotStarted { keeper: position },
+    }
+}
+
+/// Time left on the order in progress, if one is.
+fn started_left(keeper: &Keeper, transform: &Transform, queue: &OrderQueue) -> Option<f32> {
+    let order = queue.started()?;
+    Some(
+        keeper
+            .task
+            .seconds_left(transform.translation.xz(), &order.kind),
+    )
+}
+
+fn update_timeline(
+    queue: Res<OrderQueue>,
+    plan: Res<Plan>,
+    state: Res<State<GameState>>,
+    clock: Res<PrepareClock>,
+    keeper: Query<(&Keeper, &Transform)>,
+    mut timeline: ResMut<Timeline>,
+) {
+    let Ok((keeper, transform)) = keeper.single() else {
+        return;
+    };
+    let deadline = wave_deadline(*state.get(), &clock);
+    let started = started_left(keeper, transform, &queue);
+    timeline.slots = timeline::schedule(&plan.orders, started, deadline);
+    timeline.deadline = deadline;
+}
+
+/// Plans the order under the cursor as if it were queued, so the cursor label can say how long
+/// it would take and whether it would be done in time.
+fn preview_aim(
+    aim: Res<Aim>,
+    keys: Res<ButtonInput<KeyCode>>,
+    queue: Res<OrderQueue>,
+    plan: Res<Plan>,
+    backpack: Res<Backpack>,
+    nav: Res<NavGrid>,
+    trees: Res<TreeIndex>,
+    keeper: Query<(&Keeper, &Transform)>,
+    mut preview: ResMut<AimPreview>,
+) {
+    let next = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let wanted = aim
+        .target
+        .map(|target| (target.kind, next))
+        .filter(|(kind, _)| queue.find_same_target(kind).is_none() && !queue.is_full());
+    let Some((kind, next)) = wanted else {
+        preview.planned = None;
+        preview.planned_for = None;
+        return;
+    };
+    let Ok((keeper, transform)) = keeper.single() else {
+        return;
+    };
+    if preview.planned_for == wanted && !plan.is_changed() {
+        return;
+    }
+    let (orders, index) = queue.with_candidate(kind, next);
+    let planned = route::plan(
+        &orders,
+        progress(keeper, transform, &queue),
+        &backpack,
+        &nav,
+        &*trees,
+    );
+    preview.planned = planned
+        .into_iter()
+        .nth(index)
+        .map(|planned| (planned, index));
+    preview.planned_for = wanted;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tuning::{CHOP_SECONDS, KEEPER_SPEED};
+
+    #[test]
+    fn time_left_on_the_order_in_progress() {
+        let chop = OrderKind::Chop(TreeId {
+            cell: IVec2::ZERO,
+            index: 0,
+        });
+        let walking = Task::Walking {
+            order: OrderQueue::default().push(chop).unwrap(),
+            path: vec![Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0)],
+            next: 2,
+            site: None,
+        };
+        // Halfway down the second leg: half a tile to go, then the chop.
+        let left = walking.seconds_left(Vec2::new(1.0, 0.5), &chop);
+        assert!((left - (0.5 / KEEPER_SPEED + CHOP_SECONDS)).abs() < 1e-5);
+
+        let working = Task::working(OrderQueue::default().push(chop).unwrap(), 2.0, 0.5, None);
+        let Task::Working { order, swing, .. } = working else {
+            unreachable!()
+        };
+        let working = Task::Working {
+            order,
+            elapsed: 1.5,
+            duration: 2.0,
+            swing,
+            site: None,
+        };
+        assert!((working.seconds_left(Vec2::ZERO, &chop) - 0.5).abs() < 1e-5);
+        assert_eq!(Task::Idle.seconds_left(Vec2::ZERO, &chop), 0.0);
+    }
 }

@@ -2,11 +2,12 @@
 //! and a label at the cursor saying what a click would do.
 
 use super::icons::Icons;
-use super::{Popup, font, order_color, order_title, paper, wood_label};
+use super::{Popup, font, format_seconds, order_color, order_title, paper, wood_label};
 use crate::camera::DioramaCamera;
 use crate::dev::ScriptedCursor;
 use crate::keeper::{
-    Aim, Backpack, IncomingLog, OrderId, OrderKind, OrderQueue, Plan, cursor_position, shown_wood,
+    Aim, AimPreview, Backpack, IncomingLog, OrderId, OrderKind, OrderQueue, Plan, Timeline,
+    cursor_position, shown_wood,
 };
 use crate::palette;
 use bevy::prelude::*;
@@ -47,6 +48,7 @@ pub(super) struct OrderMarker {
 #[derive(Component)]
 pub(super) struct CursorLabel {
     title: Entity,
+    time: Entity,
     warning: Entity,
 }
 
@@ -107,13 +109,25 @@ pub(super) fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
         GlobalZIndex(20),
         Pickable::IGNORE,
     ));
-    let (mut title, mut warning) = (Entity::PLACEHOLDER, Entity::PLACEHOLDER);
+    let (mut title, mut time, mut warning) = (
+        Entity::PLACEHOLDER,
+        Entity::PLACEHOLDER,
+        Entity::PLACEHOLDER,
+    );
     label.with_children(|label| {
         title = label
             .spawn((
                 Text::default(),
                 font(14.0),
                 TextColor(palette::UI_INK),
+                Pickable::IGNORE,
+            ))
+            .id();
+        time = label
+            .spawn((
+                Text::default(),
+                font(12.0),
+                TextColor(palette::UI_INK_SOFT),
                 Pickable::IGNORE,
             ))
             .id();
@@ -126,7 +140,11 @@ pub(super) fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             ))
             .id();
     });
-    label.insert(CursorLabel { title, warning });
+    label.insert(CursorLabel {
+        title,
+        time,
+        warning,
+    });
 }
 
 pub(super) fn update_wood_counter(
@@ -239,10 +257,12 @@ pub(super) fn update_markers(
     plan: Res<Plan>,
     queue: Res<OrderQueue>,
     camera: Single<(&Camera, &GlobalTransform), With<DioramaCamera>>,
+    timeline: Res<Timeline>,
     mut markers: Query<(
         &OrderMarker,
         &mut Node,
         &mut BackgroundColor,
+        &mut BorderColor,
         &mut UiTransform,
     )>,
     mut texts: Query<&mut Text>,
@@ -304,7 +324,7 @@ pub(super) fn update_markers(
 
     let t = time.elapsed_secs();
     let started = queue.started().map(|order| order.id);
-    for (marker, mut node, mut background, mut transform) in &mut markers {
+    for (marker, mut node, mut background, mut border, mut transform) in &mut markers {
         let Some(&(index, planned)) = planned.get(&marker.id) else {
             continue;
         };
@@ -321,6 +341,13 @@ pub(super) fn update_markers(
             order_color(&planned.order.kind)
         };
         background.set_if_neq(BackgroundColor(color));
+        // A red ring on orders that won't be done before the wave.
+        let late = timeline.slots.get(index).is_some_and(|slot| slot.late);
+        border.set_if_neq(BorderColor::all(if late {
+            palette::PROBLEM
+        } else {
+            palette::UI_PAPER
+        }));
         // Pop in, and pulse on the order being carried out.
         let pulse = if started == Some(marker.id) {
             1.0 + 0.12 * (t * 6.0).sin().abs()
@@ -351,11 +378,13 @@ pub(super) fn update_cursor_label(
     aim: Res<Aim>,
     queue: Res<OrderQueue>,
     plan: Res<Plan>,
+    timeline: Res<Timeline>,
+    preview: Res<AimPreview>,
     backpack: Res<Backpack>,
-    label: Single<(&CursorLabel, &mut Node)>,
+    label: Single<(&CursorLabel, &mut Node, &ComputedNode)>,
     mut texts: Query<&mut Text>,
 ) {
-    let (label, mut node) = label.into_inner();
+    let (label, mut node, computed) = label.into_inner();
     let cursor = cursor_position(&window, scripted.as_deref());
     let (Some(cursor), Some(target)) = (cursor, aim.target) else {
         if node.display != Display::None {
@@ -364,10 +393,22 @@ pub(super) fn update_cursor_label(
         return;
     };
     node.display = Display::Flex;
-    node.left = Val::Px(cursor.x + 18.0);
+    // Beside the cursor, flipping to its left near the window's right edge.
+    let width = computed.size().x * computed.inverse_scale_factor();
+    let left = if cursor.x + 18.0 + width > window.width() - 8.0 {
+        cursor.x - 12.0 - width
+    } else {
+        cursor.x + 18.0
+    };
+    node.left = Val::Px(left);
     node.top = Val::Px(cursor.y + 16.0);
 
     let next = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let preview = preview.get(&timeline);
+    let time = preview
+        .filter(|(planned, _)| planned.problem.is_none())
+        .map(|(_, slot)| format!("Takes {}", format_seconds(slot.seconds())))
+        .unwrap_or_default();
     let (title, warning) = if let Some(existing) = queue.find_same_target(&target.kind) {
         let number = queue.index_of(existing).map_or(0, |index| index + 1);
         (format!("Already order {number}"), String::new())
@@ -381,11 +422,7 @@ pub(super) fn update_cursor_label(
             title = format!("Next: {title}");
         }
         // Wood at the point where the order would go in the queue.
-        let insert_at = if next {
-            queue.first_free_index()
-        } else {
-            queue.orders().len()
-        };
+        let insert_at = queue.insert_index(next);
         let wood_then = insert_at
             .checked_sub(1)
             .and_then(|previous| plan.orders.get(previous))
@@ -402,12 +439,22 @@ pub(super) fn update_cursor_label(
                     format!("Not enough wood yet (will have {wood_then})")
                 }
                 Some(crate::keeper::Problem::BackpackFull) => "Backpack will be full".to_string(),
-                _ => String::new(),
+                _ => match preview {
+                    Some((planned, _)) if planned.problem.is_some() => {
+                        crate::keeper::Problem::Unreachable.message().into()
+                    }
+                    Some((_, slot)) if slot.late => "Won't be done before the wave".into(),
+                    _ => String::new(),
+                },
             }
         };
         (title, warning)
     };
-    for (entity, text) in [(label.title, title), (label.warning, warning)] {
+    for (entity, text) in [
+        (label.title, title),
+        (label.time, time),
+        (label.warning, warning),
+    ] {
         if let Ok(mut current) = texts.get_mut(entity)
             && current.0 != text
         {

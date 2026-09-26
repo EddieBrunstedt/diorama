@@ -35,7 +35,7 @@ pub fn subcell_center(subcell: IVec2) -> Vec2 {
     (subcell.as_vec2() + 0.5) * SUBCELL - Vec2::splat(TILE_SIZE / 2.0)
 }
 
-#[cfg(test)]
+/// Total length of a path, in world units.
 pub fn path_length(path: &[Vec2]) -> f32 {
     path.windows(2).map(|pair| pair[0].distance(pair[1])).sum()
 }

@@ -68,6 +68,66 @@ const LOG: &[&str] = &[
     "............",
 ];
 
+const BELL: &[&str] = &[
+    ".....oo.....",
+    "....oyyo....",
+    "...oycyYo...",
+    "..oycyyYYo..",
+    "..oyyyyYYo..",
+    "..oyyyyYYo..",
+    ".oyyyyyyYYo.",
+    ".oyyyyyyYYo.",
+    "oyyyyyyyyYYo",
+    "oooooooooooo",
+    ".....oYo....",
+    "......o.....",
+];
+
+const HOURGLASS: &[&str] = &[
+    "oooooooooooo",
+    "owwwwwwwwwwo",
+    "oooooooooooo",
+    ".occcccccco.",
+    "..odddddco..",
+    "...oddco....",
+    "....oddo....",
+    "...ocddco...",
+    "..occddcco..",
+    ".oddddddddo.",
+    "oooooooooooo",
+    "owwwwwwwwwwo",
+];
+
+const SLIME: &[&str] = &[
+    "............",
+    "............",
+    "....oooo....",
+    "..oommmmoo..",
+    ".omcmmmmmmo.",
+    ".ommmmmmmmo.",
+    "ommkmmmmkmmo",
+    "ommkmmmmkmmo",
+    "ommmmmmmmmmo",
+    "oMMMMMMMMMMo",
+    ".oooooooooo.",
+    "............",
+];
+
+const COIN: &[&str] = &[
+    "............",
+    "...oooooo...",
+    "..onnnnnno..",
+    ".oncnnnnNNo.",
+    ".onnnNNnnNo.",
+    ".onnNnnNnNo.",
+    ".onnNnnNnNo.",
+    ".onnnNNnnNo.",
+    ".onnnnnnNNo.",
+    "..oNNNNNNo..",
+    "...oooooo...",
+    "............",
+];
+
 /// Icon handles for the UI.
 #[derive(Resource)]
 pub struct Icons {
@@ -75,6 +135,10 @@ pub struct Icons {
     pub build: Handle<Image>,
     pub walk: Handle<Image>,
     pub wood: Handle<Image>,
+    pub bell: Handle<Image>,
+    pub hourglass: Handle<Image>,
+    pub slime: Handle<Image>,
+    pub coin: Handle<Image>,
 }
 
 impl FromWorld for Icons {
@@ -85,6 +149,10 @@ impl FromWorld for Icons {
             build: images.add(pixel_art(TOWER)),
             walk: images.add(pixel_art(BOOT)),
             wood: images.add(pixel_art(LOG)),
+            bell: images.add(pixel_art(BELL)),
+            hourglass: images.add(pixel_art(HOURGLASS)),
+            slime: images.add(pixel_art(SLIME)),
+            coin: images.add(pixel_art(COIN)),
         }
     }
 }
@@ -104,6 +172,15 @@ fn pixel_color(key: char) -> Option<Color> {
         'W' => palette::BARK,
         's' => palette::HEARTH_STONE,
         'f' => palette::FLAG,
+        'n' => palette::COIN,
+        'N' => crate::voxel::shade(palette::BRASS, 0.85),
+        'y' => palette::BRASS,
+        'Y' => crate::voxel::shade(palette::BRASS, 0.72),
+        'c' => palette::UI_PAPER,
+        'd' => palette::ROAD,
+        'm' => palette::SLIME,
+        'M' => crate::voxel::shade(palette::SLIME, 0.7),
+        'k' => palette::KEEPER_EYES,
         'l' => palette::UI_PAPER_DARK,
         _ => return None,
     })
@@ -141,7 +218,7 @@ mod tests {
 
     #[test]
     fn icons_are_square_and_use_known_colors() {
-        for icon in [TREE, TOWER, BOOT, LOG] {
+        for icon in [TREE, TOWER, BOOT, LOG, BELL, HOURGLASS, SLIME, COIN] {
             assert_eq!(icon.len(), 12);
             for row in icon {
                 assert_eq!(row.len(), 12, "{row:?}");

@@ -22,3 +22,11 @@ pub const TOWER_WOOD_COST: u32 = 3;
 
 /// Most orders the queue can hold.
 pub const MAX_ORDERS: usize = 12;
+
+/// Length of the prepare phase before each wave, in seconds.
+pub const PREPARE_SECONDS: f32 = 30.0;
+/// Bonus coin per second left on the prepare timer when the bell is rung.
+/// (Coin isn't spent on anything yet; the bonus is only shown.)
+pub const BELL_COINS_PER_SECOND: f32 = 1.0;
+/// How long a wave lasts until milestone 4 adds slimes. Placeholder.
+pub const PLACEHOLDER_WAVE_SECONDS: f32 = 4.0;

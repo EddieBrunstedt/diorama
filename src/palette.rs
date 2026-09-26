@@ -70,6 +70,13 @@ pub const FLAG: Color = Color::srgb_u8(0xF4, 0xC8, 0x4A);
 pub const BLUEPRINT: Color = Color::srgb_u8(0xC4, 0xE0, 0xFF);
 pub const BLUEPRINT_PROBLEM: Color = Color::srgb_u8(0xFF, 0xB4, 0xA8);
 
+// Enemies.
+pub const SLIME: Color = Color::srgb_u8(0xA0, 0x84, 0xE8);
+
+// The prepare phase and the bell.
+pub const BRASS: Color = Color::srgb_u8(0xE6, 0xA8, 0x3E);
+pub const COIN: Color = Color::srgb_u8(0xFF, 0xD0, 0x48);
+
 // Orders and the route through them.
 pub const ROUTE: Color = Color::srgb_u8(0xFF, 0xF6, 0xE4);
 pub const ORDER_CHOP: Color = Color::srgb_u8(0xE8, 0x9A, 0x3C);

@@ -1,6 +1,7 @@
 //! The fixed diorama camera: an angled overview of the whole island, plus post-processing.
 
 use crate::island::Island;
+use crate::juice::Shake;
 use crate::palette;
 use bevy::{
     core_pipeline::tonemapping::Tonemapping,
@@ -113,11 +114,14 @@ fn fog_falloff(distance: f32) -> FogFalloff {
     }
 }
 
-/// Keeps the whole island in view when the window is resized.
+/// Keeps the whole island in view when the window is resized, and shakes the camera.
 fn frame_island(
+    time: Res<Time>,
     island: Res<Island>,
+    shake: Res<Shake>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut camera: Single<(&mut Transform, &mut DistanceFog), With<DioramaCamera>>,
+    mut framed_at: Local<Option<f32>>,
 ) {
     let aspect = window.width() / window.height().max(1.0);
     if !aspect.is_finite() {
@@ -125,7 +129,12 @@ fn frame_island(
     }
     let distance = camera_distance(&island, aspect);
     let (transform, fog) = &mut *camera;
-    if transform.set_if_neq(camera_transform(distance)) {
+    let mut framed = camera_transform(distance);
+    let offset = shake.offset(time.elapsed_secs());
+    framed.translation += framed.rotation * Vec3::new(offset.x, offset.y, 0.0);
+    transform.set_if_neq(framed);
+    if *framed_at != Some(distance) {
+        *framed_at = Some(distance);
         fog.falloff = fog_falloff(distance);
     }
 }

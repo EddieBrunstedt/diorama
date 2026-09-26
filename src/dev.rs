@@ -95,7 +95,8 @@ fn numbered(path: &str, number: usize) -> String {
     }
 }
 
-/// A mix of orders, including one without enough wood.
+/// A mix of orders, including one without enough wood and a few that won't be done before the
+/// first wave.
 fn queue_demo_orders(mut queue: ResMut<OrderQueue>) {
     let tree = |x, y, index| {
         OrderKind::Chop(TreeId {
@@ -111,6 +112,9 @@ fn queue_demo_orders(mut queue: ResMut<OrderQueue>) {
         OrderKind::Walk(Vec2::new(1.2, 1.3)),
         OrderKind::Build(IVec2::new(0, 1)),
         tree(-2, 1, 0),
+        tree(2, 1, 0),
+        tree(2, 2, 0),
+        OrderKind::Build(IVec2::new(1, 1)),
     ] {
         queue.push(kind);
     }

@@ -1,5 +1,5 @@
 //! Small in-house animation helpers: tweens with easing, squash & stretch springs, wobbles,
-//! particles, and things flying to where they're counted.
+//! particles, things flying to where they're counted, and screen shake.
 
 use crate::rng::Rng;
 use crate::voxel::{VoxelMaterial, VoxelMesh};
@@ -16,6 +16,9 @@ const WOBBLE_LIFETIME: f32 = 0.8;
 const PARTICLE_GRAVITY: f32 = 9.0;
 /// Particles bounce on the island's surface.
 const PARTICLE_FLOOR: f32 = 0.0;
+/// Trauma lost per second, and the camera offset (world units) at full trauma.
+const SHAKE_DECAY: f32 = 1.6;
+const SHAKE_MAX_OFFSET: f32 = 0.12;
 
 pub struct JuicePlugin;
 
@@ -23,6 +26,7 @@ impl Plugin for JuicePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelMaterial>()
             .init_resource::<CubeCache>()
+            .init_resource::<Shake>()
             .insert_resource(ParticleRng(Rng::new(0x9A27)))
             .add_systems(
                 Update,
@@ -32,6 +36,7 @@ impl Plugin for JuicePlugin {
                     run_wobbles,
                     run_particles,
                     run_flights,
+                    decay_shake,
                 ),
             );
     }
@@ -419,5 +424,33 @@ fn run_flights(
             commands.trigger(Landed { entity });
             commands.entity(entity).despawn();
         }
+    }
+}
+
+/// Screen shake. Add trauma for a big moment; it wears off by itself. The camera applies
+/// [`Shake::offset`]. Shaking grows with trauma squared, so small amounts stay subtle.
+#[derive(Resource, Default, Debug)]
+pub struct Shake {
+    trauma: f32,
+}
+
+impl Shake {
+    pub fn add(&mut self, trauma: f32) {
+        self.trauma = (self.trauma + trauma).min(1.0);
+    }
+
+    /// The camera offset at time `t`, in the camera's right/up plane (world units).
+    pub fn offset(&self, t: f32) -> Vec2 {
+        let strength = self.trauma * self.trauma * SHAKE_MAX_OFFSET;
+        // Out-of-phase sines: shaky, but smooth enough not to look like a glitch.
+        let x = (t * 47.0).sin() * 0.6 + (t * 83.0 + 1.3).sin() * 0.4;
+        let y = (t * 53.0 + 2.1).sin() * 0.6 + (t * 71.0 + 0.4).sin() * 0.4;
+        Vec2::new(x, y) * strength
+    }
+}
+
+fn decay_shake(time: Res<Time>, mut shake: ResMut<Shake>) {
+    if shake.trauma > 0.0 {
+        shake.trauma = (shake.trauma - SHAKE_DECAY * time.delta_secs()).max(0.0);
     }
 }
