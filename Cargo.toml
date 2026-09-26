@@ -1,0 +1,14 @@
+[package]
+name = "diorama"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.19.1"
+
+# Bevy recommends optimizing dependencies even in dev builds; our own code stays fast to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
