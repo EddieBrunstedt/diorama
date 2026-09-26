@@ -1,0 +1,154 @@
+//! Tiny pixel-art icons drawn from ASCII maps in code, shown crisp at a whole-number scale.
+
+use crate::palette;
+use bevy::{
+    asset::RenderAssetUsages,
+    image::ImageSampler,
+    prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+};
+
+const TREE: &[&str] = &[
+    ".....oo.....",
+    "....oggo....",
+    "...ogggGo...",
+    "..oggggGGo..",
+    "...ogggGo...",
+    "..oggggGGo..",
+    ".ogggggGGGo.",
+    "oggggggGGGGo",
+    "ooooobbooooo",
+    "....obbo....",
+    "....obbo....",
+    "....oooo....",
+];
+
+const TOWER: &[&str] = &[
+    ".....off....",
+    ".....o......",
+    "....orRo....",
+    "...orrRRo...",
+    "..orrrRRRo..",
+    ".orrrrRRRRo.",
+    "..owwwwwwo..",
+    "..oWo..oWo..",
+    "..oWo..oWo..",
+    "..oWwwwwWo..",
+    ".osssssssso.",
+    ".oooooooooo.",
+];
+
+const BOOT: &[&str] = &[
+    "............",
+    "...oooo.....",
+    "...obbo.....",
+    "...obbo.....",
+    "...olbo.....",
+    "...obbo.....",
+    "...obbboo...",
+    "...obbbbbo..",
+    "...obbbbbbo.",
+    "...oBBBBBBo.",
+    "...oooooooo.",
+    "............",
+];
+
+const LOG: &[&str] = &[
+    "............",
+    "............",
+    "............",
+    "oooooooooooo",
+    "obbbbbbboeeo",
+    "obbBbbbboeEo",
+    "obbbbbBboEeo",
+    "oBBBBBBBoeeo",
+    "oooooooooooo",
+    "............",
+    "............",
+    "............",
+];
+
+/// Icon handles for the UI.
+#[derive(Resource)]
+pub struct Icons {
+    pub chop: Handle<Image>,
+    pub build: Handle<Image>,
+    pub walk: Handle<Image>,
+    pub wood: Handle<Image>,
+}
+
+impl FromWorld for Icons {
+    fn from_world(world: &mut World) -> Self {
+        let mut images = world.resource_mut::<Assets<Image>>();
+        Self {
+            chop: images.add(pixel_art(TREE)),
+            build: images.add(pixel_art(TOWER)),
+            walk: images.add(pixel_art(BOOT)),
+            wood: images.add(pixel_art(LOG)),
+        }
+    }
+}
+
+fn pixel_color(key: char) -> Option<Color> {
+    Some(match key {
+        'o' => palette::UI_INK,
+        'g' => palette::PINE_TIP,
+        'G' => palette::PINE,
+        'b' => palette::BARK,
+        'B' => crate::voxel::shade(palette::BARK, 0.7),
+        'e' => palette::LOG_END,
+        'E' => crate::voxel::shade(palette::LOG_END, 0.75),
+        'r' => palette::ROOF_TOP,
+        'R' => palette::ROOF,
+        'w' => palette::PLANK,
+        'W' => palette::BARK,
+        's' => palette::HEARTH_STONE,
+        'f' => palette::FLAG,
+        'l' => palette::UI_PAPER_DARK,
+        _ => return None,
+    })
+}
+
+fn pixel_art(rows: &[&str]) -> Image {
+    let height = rows.len();
+    let width = rows[0].len();
+    let mut data = Vec::with_capacity(width * height * 4);
+    for row in rows {
+        assert_eq!(row.len(), width, "icon rows must all be the same width");
+        for key in row.chars() {
+            let rgba = pixel_color(key).map_or([0; 4], |color| color.to_srgba().to_u8_array());
+            data.extend(rgba);
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::nearest();
+    image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icons_are_square_and_use_known_colors() {
+        for icon in [TREE, TOWER, BOOT, LOG] {
+            assert_eq!(icon.len(), 12);
+            for row in icon {
+                assert_eq!(row.len(), 12, "{row:?}");
+                for key in row.chars() {
+                    assert!(key == '.' || pixel_color(key).is_some(), "unknown {key:?}");
+                }
+            }
+        }
+    }
+}

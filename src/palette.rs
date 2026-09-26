@@ -48,3 +48,38 @@ pub const EMBER_BED: Color = Color::srgb(1.0, 0.22, 0.03);
 pub const FLAME_OUTER: Color = Color::srgb(1.0, 0.3, 0.03);
 pub const FLAME_CORE: Color = Color::srgb(1.0, 0.6, 0.08);
 pub const FIRELIGHT: Color = Color::srgb(1.0, 0.62, 0.3);
+
+// The keeper: a little gnome in a red hat and a blue tunic.
+pub const KEEPER_HAT: Color = Color::srgb_u8(0xD2, 0x46, 0x3C);
+pub const KEEPER_TUNIC: Color = Color::srgb_u8(0x4A, 0x7C, 0xC0);
+pub const KEEPER_BELT: Color = Color::srgb_u8(0x5A, 0x3A, 0x28);
+pub const KEEPER_SKIN: Color = Color::srgb_u8(0xF2, 0xC0, 0x98);
+pub const KEEPER_NOSE: Color = Color::srgb_u8(0xE8, 0x96, 0x80);
+pub const KEEPER_BEARD: Color = Color::srgb_u8(0xF6, 0xF0, 0xE6);
+pub const KEEPER_BOOTS: Color = Color::srgb_u8(0x5C, 0x40, 0x32);
+pub const KEEPER_EYES: Color = Color::srgb_u8(0x2A, 0x22, 0x2E);
+pub const BACKPACK: Color = Color::srgb_u8(0xA8, 0x74, 0x48);
+pub const TOOL_METAL: Color = Color::srgb_u8(0xC8, 0xCE, 0xD8);
+pub const TOOL_HANDLE: Color = Color::srgb_u8(0xB8, 0x84, 0x52);
+
+// Towers.
+pub const PLANK: Color = Color::srgb_u8(0xC0, 0x8A, 0x55);
+pub const ROOF: Color = Color::srgb_u8(0x3E, 0x7E, 0xB0);
+pub const ROOF_TOP: Color = Color::srgb_u8(0x5A, 0x9A, 0xC8);
+pub const FLAG: Color = Color::srgb_u8(0xF4, 0xC8, 0x4A);
+pub const BLUEPRINT: Color = Color::srgb_u8(0xC4, 0xE0, 0xFF);
+pub const BLUEPRINT_PROBLEM: Color = Color::srgb_u8(0xFF, 0xB4, 0xA8);
+
+// Orders and the route through them.
+pub const ROUTE: Color = Color::srgb_u8(0xFF, 0xF6, 0xE4);
+pub const ORDER_CHOP: Color = Color::srgb_u8(0xE8, 0x9A, 0x3C);
+pub const ORDER_BUILD: Color = Color::srgb_u8(0x6C, 0xB8, 0x5C);
+pub const ORDER_WALK: Color = Color::srgb_u8(0x7C, 0xA8, 0xDC);
+pub const PROBLEM: Color = Color::srgb_u8(0xE0, 0x4A, 0x3E);
+
+// UI.
+pub const UI_PAPER: Color = Color::srgb_u8(0xFF, 0xF4, 0xE0);
+pub const UI_PAPER_DARK: Color = Color::srgb_u8(0xE8, 0xD2, 0xB0);
+pub const UI_INK: Color = Color::srgb_u8(0x4A, 0x36, 0x2C);
+pub const UI_INK_SOFT: Color = Color::srgb_u8(0x8A, 0x70, 0x5E);
+pub const UI_PROBLEM_PAPER: Color = Color::srgb_u8(0xFF, 0xD8, 0xCC);

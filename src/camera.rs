@@ -37,8 +37,9 @@ impl Plugin for CameraPlugin {
     }
 }
 
+/// The main camera, for turning the cursor into a ray and world points into screen points.
 #[derive(Component)]
-struct DioramaCamera;
+pub struct DioramaCamera;
 
 fn spawn_camera(
     mut commands: Commands,

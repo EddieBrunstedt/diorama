@@ -2,15 +2,21 @@
 //!
 //! `main` only wires plugins together; each feature area lives in its own module.
 
+// Bevy systems naturally take many parameters and spell out their queries.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 mod camera;
 mod dev;
 mod environment;
 mod hearth;
 mod island;
 mod juice;
+mod keeper;
 mod palette;
 mod rng;
+mod towers;
 mod tuning;
+mod ui;
 mod voxel;
 
 use bevy::prelude::*;
@@ -30,6 +36,9 @@ fn main() {
             camera::CameraPlugin,
             island::IslandPlugin,
             hearth::HearthPlugin,
+            towers::TowersPlugin,
+            keeper::KeeperPlugin,
+            ui::UiPlugin,
             juice::JuicePlugin,
             dev::DevPlugin,
         ))

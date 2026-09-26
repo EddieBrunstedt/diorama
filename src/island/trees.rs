@@ -124,3 +124,30 @@ pub fn tree_mesh(cell: IVec2, index: usize, style: TreeStyle) -> VoxelMesh {
     }
     mesh
 }
+
+/// What's left after chopping: a short trunk with a light cut face on top.
+pub fn stump_mesh() -> VoxelMesh {
+    let mut mesh = VoxelMesh::default();
+    mesh.cuboid(
+        Vec3::new(-0.6, 0.0, -0.6),
+        Vec3::new(0.6, 0.7, 0.6),
+        palette::BARK,
+    );
+    mesh.cuboid(
+        Vec3::new(-0.45, 0.7, -0.45),
+        Vec3::new(0.45, 0.8, 0.45),
+        palette::LOG_END,
+    );
+    // A couple of roots poking out.
+    mesh.cuboid(
+        Vec3::new(0.6, 0.0, -0.2),
+        Vec3::new(1.0, 0.3, 0.2),
+        palette::BARK,
+    );
+    mesh.cuboid(
+        Vec3::new(-0.2, 0.0, -1.0),
+        Vec3::new(0.2, 0.25, -0.6),
+        palette::BARK,
+    );
+    mesh
+}
