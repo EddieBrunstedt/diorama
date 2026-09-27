@@ -56,3 +56,10 @@ pub const TOWER_COOLDOWN: f32 = 0.8;
 pub const TOWER_DAMAGE: u32 = 1;
 /// Arrow speed in tiles per second.
 pub const ARROW_SPEED: f32 = 5.0;
+
+/// Tiles offered after each survived wave; the player picks one.
+pub const OFFER_SIZE: usize = 3;
+/// How likely each kind of tile is to be offered, relative to each other.
+pub const OFFER_WEIGHT_FOREST: u32 = 3;
+pub const OFFER_WEIGHT_MEADOW: u32 = 3;
+pub const OFFER_WEIGHT_ROAD: u32 = 2;

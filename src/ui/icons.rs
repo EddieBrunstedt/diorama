@@ -1,5 +1,6 @@
 //! Tiny pixel-art icons drawn from ASCII maps in code, shown crisp at a whole-number scale.
 
+use crate::island::TileKind;
 use crate::palette;
 use bevy::{
     asset::RenderAssetUsages,
@@ -143,6 +144,52 @@ const HEARTH: &[&str] = &[
     "oooooooooooo",
 ];
 
+// Tiles, seen from above with a strip of dirt along the front edge.
+const FOREST_TILE: &[&str] = &[
+    "oooooooooooo",
+    "ohGGGhhhhhho",
+    "oGgggGhGGGho",
+    "oGgggGGgggGo",
+    "ohGGGhGgggGo",
+    "ohhbhhhGGGho",
+    "ohhhGGGhbhho",
+    "ohhGgggGhhho",
+    "ohhGgggGhhho",
+    "ohhhGGGhhhho",
+    "ouuuubuuuuuo",
+    "oooooooooooo",
+];
+
+const MEADOW_TILE: &[&str] = &[
+    "oooooooooooo",
+    "oaaaaaaaaaao",
+    "oaAaaaapaaao",
+    "oaaaaaaaaaAo",
+    "oaaavaaaaaao",
+    "oaaaaaaAaaao",
+    "oapaaaaaaaao",
+    "oaaaaaAaavao",
+    "oaaAaaaaaaao",
+    "oaaaaaaaaaao",
+    "ouuuuuuuuuuo",
+    "oooooooooooo",
+];
+
+const ROAD_TILE: &[&str] = &[
+    "oooooooooooo",
+    "oaaaddddaaao",
+    "oaAaddddaaao",
+    "oaaadddDaaAo",
+    "oaaaddddaaao",
+    "oaaaDdddaaao",
+    "oapaddddaaao",
+    "oaaaddddaaao",
+    "oaAaddDdaaao",
+    "oaaaddddaaao",
+    "ouuuUUUUuuuo",
+    "oooooooooooo",
+];
+
 /// Icon handles for the UI.
 #[derive(Resource)]
 pub struct Icons {
@@ -155,6 +202,19 @@ pub struct Icons {
     pub slime: Handle<Image>,
     pub coin: Handle<Image>,
     pub hearth: Handle<Image>,
+    pub forest_tile: Handle<Image>,
+    pub meadow_tile: Handle<Image>,
+    pub road_tile: Handle<Image>,
+}
+
+impl Icons {
+    pub fn tile(&self, kind: TileKind) -> Handle<Image> {
+        match kind {
+            TileKind::Forest => self.forest_tile.clone(),
+            TileKind::Road => self.road_tile.clone(),
+            TileKind::Meadow | TileKind::Hearth => self.meadow_tile.clone(),
+        }
+    }
 }
 
 impl FromWorld for Icons {
@@ -170,6 +230,9 @@ impl FromWorld for Icons {
             slime: images.add(pixel_art(SLIME)),
             coin: images.add(pixel_art(COIN)),
             hearth: images.add(pixel_art(HEARTH)),
+            forest_tile: images.add(pixel_art(FOREST_TILE)),
+            meadow_tile: images.add(pixel_art(MEADOW_TILE)),
+            road_tile: images.add(pixel_art(ROAD_TILE)),
         }
     }
 }
@@ -202,6 +265,14 @@ fn pixel_color(key: char) -> Option<Color> {
         'S' => crate::voxel::shade(palette::HEARTH_STONE, 0.75),
         'F' => palette::FLAME_OUTER,
         'C' => palette::FLAME_CORE,
+        'a' => palette::MEADOW_GRASS,
+        'A' => crate::voxel::shade(palette::MEADOW_GRASS, 0.85),
+        'h' => palette::FOREST_GRASS,
+        'p' => palette::FLOWERS[2],
+        'v' => palette::FLOWERS[1],
+        'u' => palette::DIRT,
+        'U' => palette::DIRT_DARK,
+        'D' => crate::voxel::shade(palette::ROAD, 0.85),
         _ => return None,
     })
 }
@@ -238,7 +309,20 @@ mod tests {
 
     #[test]
     fn icons_are_square_and_use_known_colors() {
-        for icon in [TREE, TOWER, BOOT, LOG, BELL, HOURGLASS, SLIME, COIN, HEARTH] {
+        for icon in [
+            TREE,
+            TOWER,
+            BOOT,
+            LOG,
+            BELL,
+            HOURGLASS,
+            SLIME,
+            COIN,
+            HEARTH,
+            FOREST_TILE,
+            MEADOW_TILE,
+            ROAD_TILE,
+        ] {
             assert_eq!(icon.len(), 12);
             for row in icon {
                 assert_eq!(row.len(), 12, "{row:?}");

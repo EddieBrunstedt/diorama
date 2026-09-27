@@ -4,12 +4,14 @@ mod grid;
 mod tile_mesh;
 mod trees;
 
-pub use grid::{Island, TileKind, cell_to_world};
+pub use grid::{Island, Side, TileKind, cell_to_world};
+pub use tile_mesh::TileLook;
 
-use crate::juice::{Burst, Particles, Tween, Wobble};
+use crate::juice::{Burst, Particles, Shake, Tween, TweenTarget, Wobble};
 use crate::palette;
 use crate::phase::GameState;
 use crate::rng::Rng;
+use crate::voxel::VoxelMesh;
 use crate::voxel::{VOXEL, VoxelMaterial};
 use bevy::prelude::*;
 
@@ -19,6 +21,14 @@ const INTRO_DELAY: f32 = 0.3;
 const INTRO_STAGGER: f32 = 0.14;
 const TILE_DROP_HEIGHT: f32 = 2.5;
 const TREE_POP_DELAY: f32 = 0.35;
+/// A placed tile drops from this high.
+const PLACE_DROP_HEIGHT: f32 = 1.3;
+/// When a dropping tile first hits (a bounce-out ease lands at 1/2.75 of the way through).
+const DROP_IMPACT: f32 = 0.75 / 2.75;
+/// Neighbors knocked down by a tile landing next to them, and how long they take to spring back.
+const NEIGHBOR_DIP: f32 = 0.07;
+const NEIGHBOR_SETTLE_TIME: f32 = 0.5;
+const LANDING_SHAKE: f32 = 0.4;
 
 const INTRO_SALT: u64 = 4;
 
@@ -34,8 +44,10 @@ impl Plugin for IslandPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Island::starting())
             .init_resource::<VoxelMaterial>()
+            .add_message::<PlaceTile>()
             .add_systems(OnEnter(GameState::Intro), spawn_island)
             .add_systems(OnExit(GameState::GameOver), clear_island)
+            .add_systems(Update, (place_tiles, land_tiles, refresh_tiles).chain())
             .add_systems(Update, fell_trees);
     }
 }
@@ -43,9 +55,23 @@ impl Plugin for IslandPlugin {
 /// The visual for one grid cell. Trees and structures on the tile are its children.
 #[derive(Component, Debug)]
 pub struct Tile {
-    #[expect(dead_code, reason = "for placing tiles in milestone 5")]
     pub cell: IVec2,
     pub kind: TileKind,
+    /// What the model was built for; it's rebuilt when this changes.
+    look: TileLook,
+}
+
+/// Asks to add a tile to the island. It drops in with a bounce.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct PlaceTile {
+    pub cell: IVec2,
+    pub kind: TileKind,
+}
+
+/// A placed tile on its way down. Its neighbors adapt to it once it has landed.
+#[derive(Component, Debug)]
+struct Landing {
+    left: f32,
 }
 
 /// Identifies a tree: the forest cell it stands on and which of that cell's trees it is.
@@ -96,53 +122,186 @@ fn spawn_island(
     material: Res<VoxelMaterial>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    for (cell, kind) in island.tiles() {
+    for (cell, _) in island.tiles() {
         let mut rng = Rng::for_cell(cell, INTRO_SALT);
         let ring = cell.x.abs().max(cell.y.abs()) as f32;
         let delay = INTRO_DELAY + ring * INTRO_STAGGER + rng.range(0.0, 0.08);
         let drop = Tween::drop_in(cell_to_world(cell), TILE_DROP_HEIGHT, delay);
-        let tree_delay = drop.remaining() - TREE_POP_DELAY;
+        spawn_tile(&mut commands, &island, cell, drop, &material, &mut meshes);
+    }
+}
 
-        let tile = commands
-            .spawn((
-                Tile { cell, kind },
-                Mesh3d(meshes.add(tile_mesh::tile_mesh(&island, cell).build())),
+/// Spawns the tile on `cell` (already on the island) dropping in, with its trees popping up once
+/// it has landed.
+fn spawn_tile(
+    commands: &mut Commands,
+    island: &Island,
+    cell: IVec2,
+    drop: Tween,
+    material: &VoxelMaterial,
+    meshes: &mut Assets<Mesh>,
+) -> Entity {
+    let look = TileLook::of(island, cell);
+    let kind = look.kind;
+    let mut rng = Rng::for_cell(cell, INTRO_SALT);
+    let tree_delay = drop.remaining() - TREE_POP_DELAY;
+    let tile = commands
+        .spawn((
+            Mesh3d(meshes.add(tile_mesh::tile_mesh(cell, &look).build())),
+            Tile { cell, kind, look },
+            MeshMaterial3d(material.0.clone()),
+            drop.start_transform(),
+            Visibility::Hidden,
+            drop,
+        ))
+        .id();
+
+    if kind == TileKind::Forest {
+        for (index, spot) in trees::tree_spots(cell).into_iter().enumerate() {
+            let pop = Tween::pop_in(Vec3::splat(spot.scale), tree_delay + rng.range(0.0, 0.25));
+            let (transform, model) = tree_model(cell, index, &spot);
+            commands.spawn((
+                Tree {
+                    id: TreeId {
+                        cell,
+                        index: index as u8,
+                    },
+                    position: cell_to_world(cell).xz() + transform.translation.xz(),
+                    scale: spot.scale,
+                    rest: transform.rotation,
+                },
+                Mesh3d(meshes.add(model.build())),
                 MeshMaterial3d(material.0.clone()),
-                drop.start_transform(),
+                Transform {
+                    scale: pop.start_transform().scale,
+                    ..transform
+                },
                 Visibility::Hidden,
-                drop,
-            ))
-            .id();
+                pop,
+                ChildOf(tile),
+            ));
+        }
+    }
+    tile
+}
 
-        if kind == TileKind::Forest {
-            for (index, spot) in trees::tree_spots(cell).into_iter().enumerate() {
-                let scale = Vec3::splat(spot.scale);
-                let pop = Tween::pop_in(scale, tree_delay + rng.range(0.0, 0.25));
-                let rest =
-                    Quat::from_rotation_y(spot.quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
-                let local = spot.position * VOXEL;
-                commands.spawn((
-                    Tree {
-                        id: TreeId {
-                            cell,
-                            index: index as u8,
-                        },
-                        position: cell_to_world(cell).xz() + local,
-                        scale: spot.scale,
-                        rest,
-                    },
-                    Mesh3d(meshes.add(trees::tree_mesh(cell, index, spot.style).build())),
-                    MeshMaterial3d(material.0.clone()),
-                    Transform {
-                        translation: Vec3::new(local.x, 0.0, local.y),
-                        rotation: rest,
-                        ..pop.start_transform()
-                    },
-                    Visibility::Hidden,
-                    pop,
-                    ChildOf(tile),
-                ));
+/// A tree's model and where it stands on its tile.
+fn tree_model(cell: IVec2, index: usize, spot: &trees::TreeSpot) -> (Transform, VoxelMesh) {
+    let rest = Quat::from_rotation_y(spot.quarter_turns as f32 * std::f32::consts::FRAC_PI_2);
+    let local = spot.position * VOXEL;
+    let transform = Transform {
+        translation: Vec3::new(local.x, 0.0, local.y),
+        rotation: rest,
+        scale: Vec3::splat(spot.scale),
+    };
+    (transform, trees::tree_mesh(cell, index, spot.style))
+}
+
+/// The models a tile of `kind` on the empty `cell` would have, for previewing it: the tile
+/// itself, then its trees, each with its transform relative to the tile.
+pub fn preview_models(island: &Island, cell: IVec2, kind: TileKind) -> Vec<(Transform, VoxelMesh)> {
+    let look = TileLook::preview(island, cell, kind);
+    let mut models = vec![(Transform::IDENTITY, tile_mesh::tile_mesh(cell, &look))];
+    if kind == TileKind::Forest {
+        models.extend(
+            trees::tree_spots(cell)
+                .iter()
+                .enumerate()
+                .map(|(index, spot)| tree_model(cell, index, spot)),
+        );
+    }
+    models
+}
+
+/// Adds placed tiles to the island. They drop in; see [`land_tiles`].
+fn place_tiles(
+    mut commands: Commands,
+    mut placed: MessageReader<PlaceTile>,
+    mut island: ResMut<Island>,
+    material: Res<VoxelMaterial>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for &PlaceTile { cell, kind } in placed.read() {
+        island.place(cell, kind);
+        let drop = Tween::drop_in(cell_to_world(cell), PLACE_DROP_HEIGHT, 0.0);
+        let tile = spawn_tile(&mut commands, &island, cell, drop, &material, &mut meshes);
+        commands.entity(tile).insert(Landing { left: DROP_IMPACT });
+    }
+}
+
+/// A placed tile hits the island: dust flies, the camera shakes, and its neighbors get knocked
+/// down a little and spring back.
+fn land_tiles(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut landing: Query<(Entity, &Tile, &mut Landing)>,
+    tiles: Query<(Entity, &Tile, &Transform), Without<Tween>>,
+    mut shake: ResMut<Shake>,
+    mut particles: Particles,
+) {
+    for (entity, tile, mut landing) in &mut landing {
+        landing.left -= time.delta_secs();
+        if landing.left > 0.0 {
+            continue;
+        }
+        commands.entity(entity).remove::<Landing>();
+        shake.add(LANDING_SHAKE);
+        let at = cell_to_world(tile.cell);
+        let grass = match tile.kind {
+            TileKind::Forest => palette::FOREST_GRASS,
+            TileKind::Road => palette::ROAD,
+            _ => palette::MEADOW_GRASS,
+        };
+        for side in Side::ALL {
+            let edge = at + Vec3::new(side.offset().x as f32, 0.0, side.offset().y as f32) * 0.5;
+            particles.burst(
+                &mut commands,
+                edge + Vec3::Y * 0.05,
+                Burst {
+                    colors: &[palette::CLOUD, palette::CLOUD_SHADE, palette::DIRT, grass],
+                    count: 6,
+                    size: 0.06,
+                    spread: 1.3,
+                    lift: 1.3,
+                    lifetime: 0.7,
+                },
+            );
+        }
+        for (neighbor, other, transform) in &tiles {
+            if Side::between(tile.cell, other.cell).is_none() {
+                continue;
             }
+            let rest = cell_to_world(other.cell);
+            let from = transform.translation - Vec3::Y * NEIGHBOR_DIP;
+            commands.entity(neighbor).insert(Tween::new(
+                TweenTarget::Translation { from, to: rest },
+                EaseFunction::ElasticOut,
+                0.0,
+                NEIGHBOR_SETTLE_TIME,
+            ));
+        }
+    }
+}
+
+/// Rebuilds the models of tiles whose surroundings changed (the rock deepens toward the new
+/// middle, grass stops dripping over sides that are no longer the edge, the road's end turns
+/// toward its new tile). Waits until placed tiles have landed.
+fn refresh_tiles(
+    island: Res<Island>,
+    landing: Query<(), With<Landing>>,
+    mut landed: RemovedComponents<Landing>,
+    mut tiles: Query<(&mut Tile, &mut Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let just_landed = landed.read().count() > 0;
+    if !(island.is_changed() || just_landed) || !landing.is_empty() {
+        return;
+    }
+    for (mut tile, mut mesh) in &mut tiles {
+        let look = TileLook::of(&island, tile.cell);
+        if look != tile.look {
+            mesh.0 = meshes.add(tile_mesh::tile_mesh(tile.cell, &look).build());
+            tile.look = look;
         }
     }
 }

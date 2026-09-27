@@ -22,7 +22,7 @@ pub use timeline::Slot;
 
 use crate::island::{Island, Tree, TreeId};
 use crate::juice::{Squash, Tween};
-use crate::phase::{GameState, PrepareClock, building_allowed, wave_deadline};
+use crate::phase::{GameState, PrepareClock, building_allowed, keeper_working, wave_deadline};
 use crate::towers::{BuildSite, Tower};
 use crate::voxel::{VOXEL, VoxelMaterial};
 use bevy::prelude::*;
@@ -59,13 +59,9 @@ impl Plugin for KeeperPlugin {
             .add_systems(
                 Update,
                 (
-                    (
-                        input::aim,
-                        input::give_orders.run_if(not(in_state(GameState::GameOver))),
-                    )
-                        .chain(),
+                    (input::aim, input::give_orders.run_if(working)).chain(),
                     update_nav,
-                    work::carry_out_orders.run_if(not(in_state(GameState::GameOver))),
+                    work::carry_out_orders.run_if(working),
                     update_plan,
                     update_timeline,
                     preview_aim,
@@ -87,6 +83,12 @@ impl Plugin for KeeperPlugin {
             )
             .add_observer(work::log_landed);
     }
+}
+
+/// Run condition: the keeper is taking and carrying out orders (not while a tile is being
+/// picked, and not after game over).
+pub fn working(state: Res<State<GameState>>) -> bool {
+    keeper_working(*state.get())
 }
 
 /// Everything that changes the queue and the plan. Systems that show them run after this.

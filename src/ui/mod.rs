@@ -1,14 +1,16 @@
 //! The on-screen UI: the order queue and its timeline, the prepare clock and the bell, the wood
 //! and hearth counters, numbered markers over order targets, a label at the cursor, popups and
-//! banners, and the game over screen.
+//! banners, the tile offer, and the game over screen.
 
 mod clock;
 mod game_over;
 mod hud;
 mod icons;
+mod offer_panel;
 mod queue_panel;
 mod timeline;
 
+use crate::island::TileKind;
 use crate::keeper::{OrderId, OrderKind, PlanSystems, PlannedOrder, Problem};
 use crate::palette;
 use crate::phase::GameState;
@@ -30,10 +32,12 @@ impl Plugin for UiPlugin {
                     queue_panel::spawn_panel,
                     clock::spawn_clock,
                     game_over::spawn_game_over,
+                    offer_panel::spawn_offer_panel,
                 ),
             )
             .add_systems(OnEnter(GameState::Prepare), clock::announce_prepare)
             .add_systems(OnEnter(GameState::Wave), clock::announce_wave)
+            .add_systems(OnEnter(GameState::TileOffer), clock::announce_offer)
             .add_systems(
                 Update,
                 (
@@ -61,6 +65,11 @@ impl Plugin for UiPlugin {
                     clock::announce_cleared,
                     hud::update_hearth_counter,
                     game_over::update_game_over,
+                    (
+                        offer_panel::update_offer_panel,
+                        offer_panel::animate_offer_cards,
+                    )
+                        .chain(),
                 )
                     .after(PlanSystems),
             );
@@ -162,6 +171,25 @@ pub fn duration_text(planned: &PlannedOrder) -> String {
         OrderKind::Walk(_) => return walk,
     };
     format!("{walk} + {} {work}", format_seconds(planned.work_seconds))
+}
+
+pub fn tile_name(kind: TileKind) -> &'static str {
+    match kind {
+        TileKind::Forest => "Forest",
+        TileKind::Meadow => "Meadow",
+        TileKind::Road => "Road",
+        TileKind::Hearth => "Hearth",
+    }
+}
+
+/// The color that stands for a kind of tile, e.g. on its card's border.
+pub fn tile_color(kind: TileKind) -> Color {
+    match kind {
+        TileKind::Forest => palette::PINE,
+        TileKind::Meadow => crate::voxel::shade(palette::MEADOW_GRASS, 0.8),
+        TileKind::Road => crate::voxel::shade(palette::ROAD, 0.8),
+        TileKind::Hearth => palette::HEARTH_STONE,
+    }
 }
 
 /// Rounded paper panel styling shared by the HUD.

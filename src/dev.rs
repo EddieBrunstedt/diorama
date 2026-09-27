@@ -6,16 +6,22 @@
 //!   seconds; a comma-separated list takes several (`shot-1.png`, `shot-2.png`, ...).
 //! - `DIORAMA_DEMO=1` queues a few sample orders at startup.
 //! - `DIORAMA_SCRIPT="3 move 800 450; 3.1 down; 3.2 up"` fakes mouse input at the given times
-//!   (seconds): `move X Y` (logical pixels), `down`/`up` (left button), `shift`/`unshift`.
+//!   (seconds): `move X Y` (logical pixels), `down`/`up` (left button), `shift`/`unshift`, and
+//!   `key K` to tap a key (a letter, a digit, or `esc`), e.g. `key b` rings the bell.
 //! - `DIORAMA_SPEED=4` runs the game four times as fast, e.g. to get to later waves quickly.
 //!   Screenshot and script times are in game time, so they speed up too.
+//! - `DIORAMA_SEED=7` fixes the random seed for the tile offers, so scripted runs repeat.
 
 mod fps;
 
 use crate::island::TreeId;
 use crate::keeper::{OrderKind, OrderQueue};
 use bevy::{
-    input::{ButtonState, mouse::MouseButtonInput},
+    input::{
+        ButtonState,
+        keyboard::{Key, KeyboardInput, NativeKey},
+        mouse::MouseButtonInput,
+    },
     picking::PickingSystems,
     prelude::*,
     render::view::screenshot::{Screenshot, save_to_disk},
@@ -146,6 +152,23 @@ enum Step {
     Down,
     Up,
     Shift(bool),
+    Key(KeyCode),
+}
+
+/// A key by name: a letter, a digit, or `esc`.
+fn key_code(name: &str) -> Option<KeyCode> {
+    let upper = name.to_ascii_uppercase();
+    let code = match upper.as_str() {
+        "ESC" => KeyCode::Escape,
+        "A" => KeyCode::KeyA,
+        "B" => KeyCode::KeyB,
+        "R" => KeyCode::KeyR,
+        "1" => KeyCode::Digit1,
+        "2" => KeyCode::Digit2,
+        "3" => KeyCode::Digit3,
+        _ => return None,
+    };
+    Some(code)
 }
 
 #[derive(Resource)]
@@ -173,6 +196,12 @@ fn parse_script(script: &str) -> Result<Vec<(f32, Step)>, String> {
                 Some("up") => Step::Up,
                 Some("shift") => Step::Shift(true),
                 Some("unshift") => Step::Shift(false),
+                Some("key") => Step::Key(
+                    words
+                        .get(2)
+                        .and_then(|name| key_code(name))
+                        .ok_or_else(|| format!("unknown key in {line:?}"))?,
+                ),
                 _ => return Err(format!("unknown step {line:?}")),
             };
             Ok((number(0)?, step))
@@ -187,6 +216,7 @@ fn run_input_script(
     window: Single<Entity, With<PrimaryWindow>>,
     mut window_events: MessageWriter<WindowEvent>,
     mut buttons: MessageWriter<MouseButtonInput>,
+    mut keyboard: MessageWriter<KeyboardInput>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
 ) {
     let window = *window;
@@ -219,6 +249,19 @@ fn run_input_script(
             }
             Step::Shift(true) => keys.press(KeyCode::ShiftLeft),
             Step::Shift(false) => keys.release(KeyCode::ShiftLeft),
+            Step::Key(key_code) => {
+                // Pressed and released within the frame: it still counts as just pressed.
+                for state in [ButtonState::Pressed, ButtonState::Released] {
+                    keyboard.write(KeyboardInput {
+                        key_code,
+                        logical_key: Key::Unidentified(NativeKey::Unidentified),
+                        state,
+                        text: None,
+                        repeat: false,
+                        window,
+                    });
+                }
+            }
         }
     }
 }
@@ -229,7 +272,7 @@ mod tests {
 
     #[test]
     fn parses_scripts() {
-        let steps = parse_script("1 move 10 20; 1.5 down ;2 up; 3 shift;").unwrap();
+        let steps = parse_script("1 move 10 20; 1.5 down ;2 up; 3 shift; 4 key b").unwrap();
         assert_eq!(
             steps,
             vec![
@@ -237,10 +280,12 @@ mod tests {
                 (1.5, Step::Down),
                 (2.0, Step::Up),
                 (3.0, Step::Shift(true)),
+                (4.0, Step::Key(KeyCode::KeyB)),
             ]
         );
         assert!(parse_script("1 jump").is_err());
         assert!(parse_script("x down").is_err());
+        assert!(parse_script("1 key f13").is_err());
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod hearth;
 mod island;
 mod juice;
 mod keeper;
+mod offer;
 mod palette;
 mod phase;
 mod rng;
@@ -44,6 +45,7 @@ fn main() {
             slimes::SlimesPlugin,
             phase::PhasePlugin,
             keeper::KeeperPlugin,
+            offer::OfferPlugin,
             ui::UiPlugin,
             juice::JuicePlugin,
             dev::DevPlugin,

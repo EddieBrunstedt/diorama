@@ -3,7 +3,8 @@
 
 use super::icons::Icons;
 use super::{
-    Popup, font, format_seconds, order_color, order_title, paper, problem_color, wood_label,
+    Popup, font, format_seconds, order_color, order_title, paper, problem_color, tile_name,
+    wood_label,
 };
 use crate::camera::DioramaCamera;
 use crate::dev::ScriptedCursor;
@@ -12,6 +13,7 @@ use crate::keeper::{
     Aim, AimPreview, Backpack, IncomingLog, OrderId, OrderKind, OrderQueue, Plan, Problem,
     Timeline, cursor_position, shown_wood,
 };
+use crate::offer::{Placement, TileOffer};
 use crate::palette;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -470,12 +472,16 @@ pub(super) fn update_cursor_label(
     timeline: Res<Timeline>,
     preview: Res<AimPreview>,
     backpack: Res<Backpack>,
+    offer: Res<TileOffer>,
+    placement: Res<Placement>,
     label: Single<(&CursorLabel, &mut Node, &ComputedNode)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     let (label, mut node, computed) = label.into_inner();
     let cursor = cursor_position(&window, scripted.as_deref());
-    let (Some(cursor), Some(target)) = (cursor, aim.target) else {
+    let placing = placement.hover.filter(|_| offer.placing().is_some());
+    let shown = aim.target.is_some() || placing.is_some();
+    let Some(cursor) = cursor.filter(|_| shown) else {
         if node.display != Display::None {
             node.display = Display::None;
         }
@@ -491,6 +497,34 @@ pub(super) fn update_cursor_label(
     };
     node.left = Val::Px(left);
     node.top = Val::Px(cursor.y + 16.0);
+
+    let mut set_texts = |title: String, time: String, warning: String, color: Color| {
+        for (entity, text) in [
+            (label.title, title),
+            (label.time, time),
+            (label.warning, warning),
+        ] {
+            if let Ok((mut current, _)) = texts.get_mut(entity)
+                && current.0 != text
+            {
+                current.0 = text;
+            }
+        }
+        if let Ok((_, mut warning_color)) = texts.get_mut(label.warning) {
+            warning_color.set_if_neq(TextColor(color));
+        }
+    };
+
+    // Placing a tile from the offer.
+    if let Some(spot) = placing {
+        let title = format!("Place {}", tile_name(spot.kind).to_lowercase());
+        let warning = spot.fits.err().map_or("", |blocked| blocked.message());
+        set_texts(title, String::new(), warning.to_string(), palette::PROBLEM);
+        return;
+    }
+    let Some(target) = aim.target else {
+        return;
+    };
 
     let next = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let preview = preview.get(&timeline);
@@ -544,18 +578,5 @@ pub(super) fn update_cursor_label(
         };
         (title, warning)
     };
-    for (entity, text) in [
-        (label.title, title),
-        (label.time, time),
-        (label.warning, warning),
-    ] {
-        if let Ok((mut current, _)) = texts.get_mut(entity)
-            && current.0 != text
-        {
-            current.0 = text;
-        }
-    }
-    if let Ok((_, mut color)) = texts.get_mut(label.warning) {
-        color.set_if_neq(TextColor(warning_color));
-    }
+    set_texts(title, time, warning, warning_color);
 }

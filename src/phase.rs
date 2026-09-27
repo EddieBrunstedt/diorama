@@ -1,10 +1,9 @@
-//! Game flow: the timed prepare phase, ringing the bell to start the wave early, the wave, and
-//! game over.
+//! Game flow: the timed prepare phase, ringing the bell to start the wave early, the wave, the
+//! tile offer, and game over.
 //!
 //! `Intro` (the island assembles and the keeper lands) → `Prepare` (timed) → `Wave` (until every
-//! slime is gone) → `Prepare` → ... until the hearth goes out: `GameOver`, then back to `Intro` for
-//! a new run. Milestone 5 puts a tile offer between the wave and the next prepare phase
-//! (see [`after_wave`]).
+//! slime is gone) → `TileOffer` (pick a tile and place it; see [`crate::offer`]) → `Prepare` → ...
+//! until the hearth goes out: `GameOver`, then back to `Intro` for a new run.
 //!
 //! Starting over: every plugin tears down its part of the old run on `OnExit(GameOver)` and
 //! spawns the new one on `OnEnter(Intro)`, which also runs when the game starts.
@@ -34,6 +33,7 @@ impl Plugin for PhasePlugin {
             .add_message::<Restart>()
             .add_systems(OnEnter(GameState::Prepare), start_prepare)
             .add_systems(OnEnter(GameState::Wave), start_wave)
+            .add_systems(OnEnter(GameState::TileOffer), start_tile_offer)
             .add_systems(OnExit(GameState::GameOver), reset_run)
             .add_systems(
                 Update,
@@ -59,6 +59,9 @@ pub enum GameState {
     Prepare,
     /// Slimes come down the road until they're all gone.
     Wave,
+    /// The wave was survived: pick a new tile and place it. The keeper waits, the clock hasn't
+    /// started yet.
+    TileOffer,
     /// The hearth went out. Shows the score until the player starts over.
     GameOver,
 }
@@ -93,23 +96,33 @@ impl PrepareClock {
     }
 }
 
-/// Seconds until the wave starts, while there's a deadline to plan against.
+/// Seconds until the wave starts, while there's a deadline to plan against. During the tile
+/// offer that's the whole prepare phase coming up.
 pub fn wave_deadline(state: GameState, clock: &PrepareClock) -> Option<f32> {
     match state {
-        GameState::Intro | GameState::Prepare => Some(clock.left),
+        GameState::Intro | GameState::Prepare | GameState::TileOffer => Some(clock.left),
         GameState::Wave | GameState::GameOver => None,
     }
 }
 
 /// Whether the keeper may start building. Not during the wave: builds wait for the next
-/// prepare phase.
+/// prepare phase. The tile offer plans for the prepare phase coming up.
 pub fn building_allowed(state: GameState) -> bool {
-    matches!(state, GameState::Intro | GameState::Prepare)
+    matches!(
+        state,
+        GameState::Intro | GameState::Prepare | GameState::TileOffer
+    )
 }
 
-/// Where the game goes once a wave is survived. Milestone 5 puts the tile offer here.
+/// Whether the keeper carries out orders. He waits while a tile is picked, so taking time over
+/// the offer doesn't buy him extra time.
+pub fn keeper_working(state: GameState) -> bool {
+    !matches!(state, GameState::TileOffer | GameState::GameOver)
+}
+
+/// Where the game goes once a wave is survived.
 pub fn after_wave() -> GameState {
-    GameState::Prepare
+    GameState::TileOffer
 }
 
 /// Bonus coin for ringing the bell with this much prepare time left.
@@ -196,6 +209,11 @@ fn start_wave(mut cleared: ResMut<Cleared>) {
     cleared.0 = None;
 }
 
+/// The clock is wound for the next prepare phase, so the timeline shows the plan against it.
+fn start_tile_offer(mut clock: ResMut<PrepareClock>) {
+    *clock = PrepareClock::default();
+}
+
 /// Ends the wave: game over when the hearth is out, survived once every slime is gone.
 fn end_wave(
     time: Res<Time>,
@@ -272,6 +290,7 @@ mod tests {
         };
         assert_eq!(wave_deadline(GameState::Prepare, &clock), Some(12.0));
         assert_eq!(wave_deadline(GameState::Intro, &clock), Some(12.0));
+        assert_eq!(wave_deadline(GameState::TileOffer, &clock), Some(12.0));
         assert_eq!(wave_deadline(GameState::Wave, &clock), None);
         assert_eq!(wave_deadline(GameState::GameOver, &clock), None);
     }
@@ -282,5 +301,22 @@ mod tests {
         assert!(building_allowed(GameState::Prepare));
         assert!(!building_allowed(GameState::Wave));
         assert!(!building_allowed(GameState::GameOver));
+        assert!(
+            building_allowed(GameState::TileOffer),
+            "plans for the next prepare phase"
+        );
+    }
+
+    #[test]
+    fn the_keeper_waits_while_a_tile_is_picked() {
+        assert!(keeper_working(GameState::Prepare));
+        assert!(keeper_working(GameState::Wave));
+        assert!(!keeper_working(GameState::TileOffer));
+        assert!(!keeper_working(GameState::GameOver));
+    }
+
+    #[test]
+    fn a_survived_wave_leads_to_the_tile_offer() {
+        assert_eq!(after_wave(), GameState::TileOffer);
     }
 }

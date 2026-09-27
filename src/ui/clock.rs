@@ -338,7 +338,10 @@ pub(super) fn update_clock(
     let (mut panel, mut transform) = panel.into_inner();
     let dt = time.delta_secs();
     let state = *state.get();
-    let preparing = matches!(state, GameState::Intro | GameState::Prepare);
+    let preparing = matches!(
+        state,
+        GameState::Intro | GameState::Prepare | GameState::TileOffer
+    );
     let hurry = state == GameState::Prepare && clock.left <= HURRY_SECONDS;
 
     let slimes_left = |left: u32| match left {
@@ -347,7 +350,7 @@ pub(super) fn update_clock(
         left => format!("{left} slimes"),
     };
     let (label, text, color) = match state {
-        GameState::Intro | GameState::Prepare => (
+        GameState::Intro | GameState::Prepare | GameState::TileOffer => (
             format!("WAVE {} IN", waves.current()),
             format_clock(clock.left),
             if hurry {
@@ -391,7 +394,9 @@ pub(super) fn update_clock(
     }
     if let Ok((mut node, mut background)) = nodes.get_mut(panel.fill) {
         let fraction = match state {
-            GameState::Intro | GameState::Prepare => clock.left / clock.total.max(1e-3),
+            GameState::Intro | GameState::Prepare | GameState::TileOffer => {
+                clock.left / clock.total.max(1e-3)
+            }
             GameState::Wave => run.left() as f32 / run.spec.count.max(1) as f32,
             GameState::GameOver => 0.0,
         };
@@ -584,6 +589,18 @@ pub(super) fn announce_wave(
         palette::SLIME,
         icon,
         subtitle,
+    );
+}
+
+/// A banner when the tile offer comes up.
+pub(super) fn announce_offer(commands: Commands, icons: Res<Icons>, banners: Query<&mut Banner>) {
+    spawn_banner(
+        commands,
+        banners,
+        "Grow the island!",
+        palette::MEADOW_GRASS,
+        Some(icons.meadow_tile.clone()),
+        "Pick a new tile and place it on the edge".to_string(),
     );
 }
 

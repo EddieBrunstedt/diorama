@@ -1,8 +1,9 @@
 //! The fixed diorama camera: an angled overview of the whole island, plus post-processing.
 
-use crate::island::Island;
+use crate::island::{Island, cell_to_world};
 use crate::juice::Shake;
 use crate::palette;
+use crate::voxel::TILE_SIZE;
 use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     light::NotShadowCaster,
@@ -28,12 +29,21 @@ const MIN_ASPECT: f32 = 1.2;
 const LOOK_AT: Vec3 = Vec3::new(0.0, -0.45, 0.0);
 /// Distance of the sky backdrop from the camera.
 const BACKDROP_DISTANCE: f32 = 200.0;
+/// How quickly the camera eases to a new framing (per second, exponential), e.g. when the island
+/// grows or UI covers part of the screen.
+const REFRAME_RATE: f32 = 4.0;
+/// Room (logical pixels) kept between the island and the window's edge or UI covering it.
+const UI_MARGIN: f32 = 20.0;
+/// How much bigger than the starting island (on screen) the island may grow before the camera
+/// moves to keep it in view.
+const GROWTH_ROOM: f32 = 1.3;
 
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
+        app.init_resource::<CoveredRight>()
+            .add_systems(Startup, spawn_camera)
             .add_systems(Update, frame_island);
     }
 }
@@ -41,6 +51,11 @@ impl Plugin for CameraPlugin {
 /// The main camera, for turning the cursor into a ray and world points into screen points.
 #[derive(Component)]
 pub struct DioramaCamera;
+
+/// How much of the screen's right side UI is covering (logical pixels), e.g. the tile offer.
+/// The camera slides the island to the left to keep it clear, if there's room.
+#[derive(Resource, Default)]
+pub struct CoveredRight(pub f32);
 
 fn spawn_camera(
     mut commands: Commands,
@@ -114,29 +129,121 @@ fn fog_falloff(distance: f32) -> FogFalloff {
     }
 }
 
-/// Keeps the whole island in view when the window is resized, and shakes the camera.
+/// Keeps the island in view as it grows and when the window is resized, keeps it clear of UI
+/// covering the right side, and shakes the camera.
+///
+/// The framing is tuned for the starting island, with room around it to grow. The island may
+/// grow into that room (a bit past the starting island's size on screen) before the camera slides
+/// or backs off to keep it all in view.
 fn frame_island(
     time: Res<Time>,
     island: Res<Island>,
     shake: Res<Shake>,
+    covered: Res<CoveredRight>,
     window: Single<&Window, With<PrimaryWindow>>,
-    mut camera: Single<(&mut Transform, &mut DistanceFog), With<DioramaCamera>>,
+    mut camera: Single<(&Camera, &mut Transform, &mut DistanceFog), With<DioramaCamera>>,
+    mut starting: Local<Option<Island>>,
     mut framed_at: Local<Option<f32>>,
+    mut pan: Local<Vec2>,
 ) {
-    let aspect = window.width() / window.height().max(1.0);
+    let size = window.size();
+    let aspect = size.x / size.y.max(1.0);
     if !aspect.is_finite() {
         return;
     }
-    let distance = camera_distance(&island, aspect);
-    let (transform, fog) = &mut *camera;
+    let starting = starting.get_or_insert_with(Island::starting);
+    let (camera, transform, fog) = &mut *camera;
+    let base = camera_distance(starting, aspect);
+    let base_transform = camera_transform(base);
+
+    // Where the island may be on screen: its starting size plus room to grow, inside the window
+    // and clear of covering UI.
+    let Some(start) = screen_bounds(camera, &base_transform, starting.tiles().map(|(c, _)| c))
+    else {
+        return;
+    };
+    let mut room = Rect::from_center_half_size(start.center(), start.half_size() * GROWTH_ROOM);
+    room.min = room.min.max(Vec2::splat(UI_MARGIN));
+    room.max = room
+        .max
+        .min(size - Vec2::new(covered.0 + UI_MARGIN, UI_MARGIN));
+    // While placing a tile, the free spots around the island count too.
+    let cells: Vec<IVec2> = if covered.0 > 0.0 {
+        island
+            .tiles()
+            .map(|(cell, _)| cell)
+            .chain(island.edge_cells())
+            .collect()
+    } else {
+        island.tiles().map(|(cell, _)| cell).collect()
+    };
+    let Some(needed) = screen_bounds(camera, &base_transform, cells.iter().copied()) else {
+        return;
+    };
+    // On screen, sizes shrink in proportion to the distance.
+    let zoom = (needed.size() / room.size().max(Vec2::ONE))
+        .max_element()
+        .max(1.0);
+    let wanted = base * zoom;
+
+    let ease = 1.0 - (-REFRAME_RATE * time.delta_secs()).exp();
+    let distance = match *framed_at {
+        // Snap on the first frame and when the window is resized a lot; ease otherwise.
+        Some(current) if (current - wanted).abs() < wanted * 0.5 => current.lerp(wanted, ease),
+        _ => wanted,
+    };
     let mut framed = camera_transform(distance);
-    let offset = shake.offset(time.elapsed_secs());
+
+    // Slide the island (by moving the camera the other way) just enough to bring it into its room.
+    let wanted_pan =
+        screen_bounds(camera, &framed, cells.iter().copied()).map_or(Vec2::ZERO, |at| {
+            let push = |low: f32, high: f32, min: f32, max: f32| {
+                if high > max {
+                    (high - max).min(low - min).max(0.0)
+                } else if low < min {
+                    -(min - low).min(max - high).max(0.0)
+                } else {
+                    0.0
+                }
+            };
+            Vec2::new(
+                push(at.min.x, at.max.x, room.min.x, room.max.x),
+                push(at.min.y, at.max.y, room.min.y, room.max.y),
+            )
+        });
+    *pan = pan.lerp(wanted_pan, ease);
+    let fov = FOV_DEGREES.to_radians();
+    let world_per_pixel = 2.0 * distance * (fov / 2.0).tan() / size.y.max(1.0);
+    // Screen y points down, camera y up.
+    let offset = shake.offset(time.elapsed_secs()) + Vec2::new(pan.x, -pan.y) * world_per_pixel;
     framed.translation += framed.rotation * Vec3::new(offset.x, offset.y, 0.0);
     transform.set_if_neq(framed);
-    if *framed_at != Some(distance) {
-        *framed_at = Some(distance);
+    if framed_at.is_none_or(|at| (at - distance).abs() > 0.01) {
         fog.falloff = fog_falloff(distance);
     }
+    *framed_at = Some(distance);
+}
+
+/// The screen rectangle covering the surfaces of `cells`, seen from `transform`.
+fn screen_bounds(
+    camera: &Camera,
+    transform: &Transform,
+    cells: impl Iterator<Item = IVec2>,
+) -> Option<Rect> {
+    let global = GlobalTransform::from(*transform);
+    let half = TILE_SIZE / 2.0;
+    cells
+        .flat_map(|cell| {
+            let center = cell_to_world(cell);
+            [(-half, -half), (half, -half), (-half, half), (half, half)]
+                .map(|(x, z)| center + Vec3::new(x, 0.0, z))
+        })
+        .filter_map(|corner| camera.world_to_viewport(&global, corner).ok())
+        .fold(None, |bounds: Option<Rect>, point| {
+            Some(bounds.map_or(Rect::from_corners(point, point), |bounds| {
+                bounds.union_point(point)
+            }))
+        })
 }
 
 /// A quad with a vertical color gradient from the horizon color up to the sky color.

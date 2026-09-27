@@ -26,7 +26,12 @@ const ROAD_TO: usize = 7;
 const EDGE_DEPTH: f32 = 8.0;
 const DEPTH_PER_RING: f32 = 9.0;
 
+// Each part of the model has its own random stream, so a change in one (e.g. the rock, when a
+// neighbor is placed) doesn't reshuffle the others (e.g. the flowers).
 const SURFACE_SALT: u64 = 1;
+const ROCK_SALT: u64 = 7;
+const DRIP_SALT: u64 = 8;
+const DETAIL_SALT: u64 = 9;
 
 /// What a single surface voxel is made of.
 #[derive(Clone, Copy, PartialEq)]
@@ -36,23 +41,71 @@ enum Surface {
     Cobble,
 }
 
-pub fn tile_mesh(island: &Island, cell: IVec2) -> VoxelMesh {
-    let kind = island
-        .get(cell)
-        .expect("tile_mesh called for an empty cell");
+/// Everything about a tile and its surroundings that its model depends on. When this changes
+/// (e.g. a neighbor is placed), the model is rebuilt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TileLook {
+    pub kind: TileKind,
+    /// Sides the road runs out of.
+    pub road_sides: Vec<Side>,
+    /// Sides with no tile next to them: the island's outside.
+    pub open_sides: Vec<Side>,
+    /// Steps to the island's edge; the rock hangs deeper toward the middle.
+    pub edge_distance: u32,
+}
+
+impl TileLook {
+    pub fn of(island: &Island, cell: IVec2) -> Self {
+        let kind = island
+            .get(cell)
+            .expect("TileLook::of called for an empty cell");
+        let mut road_sides = island.road_sides(cell);
+        road_sides.sort_by_key(|side| *side as u8);
+        Self {
+            kind,
+            road_sides,
+            open_sides: Side::ALL
+                .into_iter()
+                .filter(|side| island.get(cell + side.offset()).is_none())
+                .collect(),
+            edge_distance: island.edge_distance(cell),
+        }
+    }
+
+    /// How a tile of `kind` would look on the empty `cell`. A road that doesn't connect (the
+    /// placement is invalid) still shows a straight road, so it reads as a road tile.
+    pub fn preview(island: &Island, cell: IVec2, kind: TileKind) -> Self {
+        let mut placed = island.clone();
+        placed.place(cell, kind);
+        let mut look = Self::of(&placed, cell);
+        if kind == TileKind::Road && look.road_sides.is_empty() {
+            look.road_sides = vec![Side::North, Side::South];
+        }
+        look
+    }
+}
+
+pub fn tile_mesh(cell: IVec2, look: &TileLook) -> VoxelMesh {
     let mut rng = Rng::for_cell(cell, SURFACE_SALT);
     let mut mesh = VoxelMesh::default();
 
-    let surfaces = surface_layout(kind, &island.road_sides(cell), &mut rng);
-    let open_sides: Vec<Side> = Side::ALL
-        .into_iter()
-        .filter(|side| island.get(cell + side.offset()).is_none())
-        .collect();
-
-    add_surface(&mut mesh, kind, &surfaces, &mut rng);
-    add_rock(&mut mesh, island.edge_distance(cell), &open_sides, &mut rng);
-    add_grass_drips(&mut mesh, kind, &surfaces, &open_sides, &mut rng);
-    match kind {
+    let surfaces = surface_layout(look.kind, &look.road_sides, &mut rng);
+    add_surface(&mut mesh, look.kind, &surfaces, &mut rng);
+    add_rock(
+        &mut mesh,
+        look.edge_distance,
+        &look.open_sides,
+        &mut Rng::for_cell(cell, ROCK_SALT),
+    );
+    add_grass_drips(
+        &mut mesh,
+        look.kind,
+        &surfaces,
+        &look.open_sides,
+        &mut Rng::for_cell(cell, DRIP_SALT),
+    );
+    let mut rng = Rng::for_cell(cell, DETAIL_SALT);
+    match look.kind {
         TileKind::Meadow => add_meadow_details(&mut mesh, &surfaces, &mut rng),
         TileKind::Forest => add_forest_details(&mut mesh, &tree_spots(cell), &mut rng),
         TileKind::Road | TileKind::Hearth => {}

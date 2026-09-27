@@ -6,6 +6,7 @@ use super::{
     OrderQueue, Task, Tool,
 };
 use crate::juice::Tween;
+use crate::phase::{GameState, keeper_working};
 use bevy::prelude::*;
 use std::f32::consts::PI;
 
@@ -24,6 +25,7 @@ type FootFilter = (Without<Keeper>, Without<KeeperBody>, Without<KeeperArm>);
 
 pub(super) fn animate_keeper(
     time: Res<Time>,
+    state: Res<State<GameState>>,
     queue: Res<OrderQueue>,
     mut keeper: Query<(&mut Keeper, &mut Transform)>,
     mut body: Query<&mut Transform, BodyFilter>,
@@ -43,7 +45,9 @@ pub(super) fn animate_keeper(
     let turn = Quat::from_rotation_y(keeper.facing);
     transform.rotation = transform.rotation.slerp(turn, (TURN_RATE * dt).min(1.0));
 
-    let walking = matches!(keeper.task, Task::Walking { .. });
+    // While he waits (a tile is being picked), he stands idle mid-order.
+    let paused = !keeper_working(*state.get());
+    let walking = !paused && matches!(keeper.task, Task::Walking { .. });
     // Each step is half a cycle of the walk wave: left foot, then right.
     let wave = keeper.walk_phase * PI;
     let (mut bob, mut roll, mut lean) = (0.0, 0.0, 0.0);
@@ -53,7 +57,7 @@ pub(super) fn animate_keeper(
         roll = wave.sin() * 0.09;
         lean = 0.1;
         arm_angle = ARM_REST + wave.sin() * 0.55;
-    } else if let Task::Working { elapsed, swing, .. } = keeper.task {
+    } else if !paused && let Task::Working { elapsed, swing, .. } = keeper.task {
         let hammer = matches!(queue.started().map(|o| o.kind), Some(OrderKind::Build(_)));
         let wound_up = if hammer {
             ARM_HAMMER_WOUND_UP

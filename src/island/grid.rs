@@ -111,6 +111,31 @@ impl Island {
         self.tiles.iter().map(|(&cell, &kind)| (cell, kind))
     }
 
+    /// Puts a tile on `cell` (replacing whatever was there).
+    pub fn place(&mut self, cell: IVec2, kind: TileKind) {
+        self.tiles.insert(cell, kind);
+    }
+
+    /// The tiles next to `cell`, with the side of `cell` they're on.
+    pub fn neighbors(&self, cell: IVec2) -> impl Iterator<Item = (Side, TileKind)> + '_ {
+        Side::ALL
+            .into_iter()
+            .filter_map(move |side| Some((side, self.get(cell + side.offset())?)))
+    }
+
+    /// The empty cells touching the island, sorted row by row: where new tiles can go.
+    pub fn edge_cells(&self) -> Vec<IVec2> {
+        let mut cells: Vec<IVec2> = self
+            .tiles
+            .keys()
+            .flat_map(|&cell| Side::ALL.map(|side| cell + side.offset()))
+            .filter(|cell| !self.tiles.contains_key(cell))
+            .collect();
+        cells.sort_by_key(|cell| (cell.y, cell.x));
+        cells.dedup();
+        cells
+    }
+
     /// Number of steps from `cell` to the nearest cell without a tile (1 for edge tiles).
     /// Used to shape the island's underside: deeper toward the middle.
     pub fn edge_distance(&self, cell: IVec2) -> u32 {
@@ -154,6 +179,11 @@ impl Island {
         }
         path.reverse();
         path
+    }
+
+    /// The road cell furthest from the hearth, where slimes come in.
+    pub fn road_end(&self) -> Option<IVec2> {
+        self.road_path().first().copied()
     }
 
     /// The side of the road's open end where enemies come in from off the island.
@@ -278,6 +308,33 @@ mod tests {
         assert_eq!(island.edge_distance(IVec2::new(-2, -2)), 1);
         assert_eq!(island.edge_distance(IVec2::new(-1, -1)), 2);
         assert_eq!(island.edge_distance(IVec2::ZERO), 3);
+    }
+
+    #[test]
+    fn edge_cells_ring_the_island() {
+        let island = Island::from_map(&[".H"]);
+        assert_eq!(
+            island.edge_cells(),
+            vec![
+                IVec2::new(-1, -1),
+                IVec2::new(0, -1),
+                IVec2::new(-2, 0),
+                IVec2::new(1, 0),
+                IVec2::new(-1, 1),
+                IVec2::new(0, 1),
+            ]
+        );
+        assert_eq!(Island::starting().edge_cells().len(), 20);
+    }
+
+    #[test]
+    fn placing_extends_the_road() {
+        let mut island = Island::starting();
+        assert_eq!(island.road_end(), Some(IVec2::new(1, -2)));
+        island.place(IVec2::new(1, -3), TileKind::Road);
+        assert_eq!(island.road_end(), Some(IVec2::new(1, -3)));
+        assert_eq!(island.road_entry(), Some((IVec2::new(1, -3), Side::North)));
+        assert_eq!(island.road_path().len(), 5);
     }
 
     #[test]

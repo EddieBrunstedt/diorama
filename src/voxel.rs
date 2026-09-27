@@ -112,3 +112,21 @@ pub fn vary(color: Color, rng: &mut Rng, lightness: f32, hue: f32) -> Color {
     c.hue = (c.hue + rng.range(-hue, hue)).rem_euclid(360.0);
     c.into()
 }
+
+/// Four L-shaped corners around a tile, in voxels.
+pub fn bracket_mesh() -> VoxelMesh {
+    let mut mesh = VoxelMesh::default();
+    const OUTER: f32 = 5.2;
+    const ARM: f32 = 2.2;
+    const THICK: f32 = 0.7;
+    for (sx, sz) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        let corner = Vec3::new(sx * OUTER, 0.0, sz * OUTER);
+        let inward_x = Vec3::new(-sx * ARM, 0.5, -sz * THICK);
+        let inward_z = Vec3::new(-sx * THICK, 0.5, -sz * ARM);
+        for inward in [inward_x, inward_z] {
+            let other = corner + inward;
+            mesh.cuboid(corner.min(other), corner.max(other), Color::WHITE);
+        }
+    }
+    mesh
+}
