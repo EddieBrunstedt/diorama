@@ -1,8 +1,10 @@
 //! The hover highlight: corner brackets and a faint fill on the cell under the cursor, or on
-//! every cell of a drag. The color says what a click does there: build (cyan), nothing (red), or
-//! remove (orange, over a wall).
+//! every cell of a drag. The color says what a left click does there: build (cyan), repair
+//! (green, over something damaged), or nothing (red, also when the money doesn't cover it). Over
+//! something built and whole, it's orange: a right click sells it.
 
-use super::{ActiveStroke, BuildDenied, BuildSystems, history::StrokeKind};
+use super::{ActiveStroke, BuildDenied, BuildSystems, Tool, history::StrokeKind};
+use crate::economy::{Wallet, affordable_repair, price};
 use crate::grid::{Blocked, Grid};
 use crate::juice::Squash;
 use crate::palette;
@@ -34,6 +36,7 @@ enum Look {
     Build,
     Blocked,
     Remove,
+    Repair,
 }
 
 #[derive(Resource)]
@@ -41,7 +44,7 @@ struct HighlightAssets {
     bracket: Handle<Mesh>,
     fill: Handle<Mesh>,
     /// Bracket and fill materials for each look, in `Look` order.
-    materials: [(Handle<StandardMaterial>, Handle<StandardMaterial>); 3],
+    materials: [(Handle<StandardMaterial>, Handle<StandardMaterial>); 4],
 }
 
 impl HighlightAssets {
@@ -82,6 +85,7 @@ impl FromWorld for HighlightAssets {
                 pair(palette::HOVER_OK),
                 pair(palette::HOVER_BLOCKED),
                 pair(palette::HOVER_REMOVE),
+                pair(palette::HOVER_REPAIR),
             ],
         }
     }
@@ -98,15 +102,28 @@ struct Slot {
 struct Slots(Vec<Entity>);
 
 /// What to highlight, the cursor's cell first.
-fn wanted(grid: &Grid, pointer: &Pointer, active: &ActiveStroke) -> Vec<(IVec2, Look)> {
+fn wanted(
+    grid: &Grid,
+    pointer: &Pointer,
+    active: &ActiveStroke,
+    tool: Tool,
+    wallet: Wallet,
+) -> Vec<(IVec2, Look)> {
     match &active.0 {
         None => pointer
             .cell
             .map(|cell| {
                 let look = match grid.check_build(cell) {
-                    Ok(()) => Look::Build,
+                    Ok(()) if wallet.money() >= price(tool.0) => Look::Build,
+                    Err(Blocked::Occupied(structure)) if structure.damaged() => {
+                        if affordable_repair(structure, wallet.money()).is_some() {
+                            Look::Repair
+                        } else {
+                            Look::Blocked
+                        }
+                    }
                     Err(Blocked::Occupied(structure)) if structure.removable() => Look::Remove,
-                    Err(_) => Look::Blocked,
+                    _ => Look::Blocked,
                 };
                 vec![(cell, look)]
             })
@@ -119,7 +136,8 @@ fn wanted(grid: &Grid, pointer: &Pointer, active: &ActiveStroke) -> Vec<(IVec2, 
                 let look = match stroke.kind {
                     StrokeKind::Remove => Look::Remove,
                     StrokeKind::Place(_) if stroke.changed(cell) => Look::Build,
-                    StrokeKind::Place(_) => Look::Blocked,
+                    StrokeKind::Repair if stroke.changed(cell) => Look::Repair,
+                    StrokeKind::Place(_) | StrokeKind::Repair => Look::Blocked,
                 };
                 (cell, look)
             })
@@ -133,6 +151,8 @@ fn show_highlights(
     grid: Res<Grid>,
     pointer: Res<Pointer>,
     active: Res<ActiveStroke>,
+    tool: Res<Tool>,
+    wallet: Res<Wallet>,
     assets: Res<HighlightAssets>,
     mut denials: MessageReader<BuildDenied>,
     mut slots: ResMut<Slots>,
@@ -147,7 +167,7 @@ fn show_highlights(
     mut last_cursor: Local<Option<IVec2>>,
     mut flash: Local<Option<(IVec2, f32)>>,
 ) {
-    let mut wanted = wanted(&grid, &pointer, &active);
+    let mut wanted = wanted(&grid, &pointer, &active, *tool, *wallet);
 
     // A refused click flashes the cell red for a moment and pops the brackets.
     let mut pop = None;

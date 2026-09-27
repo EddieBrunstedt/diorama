@@ -10,6 +10,7 @@ mod build;
 mod camera;
 mod command_center;
 mod dev;
+mod economy;
 mod environment;
 mod flow;
 mod grid;
@@ -23,8 +24,9 @@ mod preview;
 mod rng;
 mod shapes;
 mod structures;
+mod towers;
 mod tuning;
-mod walls;
+mod wear;
 
 use bevy::prelude::*;
 
@@ -49,7 +51,11 @@ fn main() {
             build::BuildPlugin,
             structures::StructuresPlugin,
             flow::FlowPlugin,
-            walls::WallsPlugin,
+            wear::WearPlugin,
+            towers::TowersPlugin,
+            economy::EconomyPlugin,
+        ))
+        .add_plugins((
             horde::HordePlugin,
             command_center::CommandCenterPlugin,
             preview::PreviewPlugin,

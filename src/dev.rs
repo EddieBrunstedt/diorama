@@ -18,13 +18,18 @@
 //!   script times are in game time, so they speed up too.
 //! - `DIORAMA_BATCH=3000` makes Space release that many swarmers at once, for testing how many
 //!   the game can take. `DIORAMA_BRUTES=10` does the same for the brutes B releases.
+//! - `DIORAMA_MONEY=5000` starts with that much money.
 //! - `DIORAMA_SEED=7` fixes the random seed (see [`RunSeed`]), so scripted runs repeat.
+//! - `DIORAMA_FRAME_LOG=1` logs frame times, the size of the horde, and how long the horde's and
+//!   the towers' steps take, once a second (see [`frame_log`]).
 //! - `DIORAMA_GPU_TIMES=1` logs the GPU time of each render pass every few seconds (see [`gpu`]).
 
 mod fps;
+mod frame_log;
 mod gpu;
 
 use crate::camera::{CameraRig, MainCamera};
+use crate::economy::Wallet;
 use crate::grid::cell_center;
 use crate::horde::{BatchSize, BruteBatch};
 use crate::rng::RunSeed;
@@ -50,6 +55,9 @@ pub struct DevPlugin;
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(fps::FpsPlugin);
+        if std::env::var_os("DIORAMA_FRAME_LOG").is_some() {
+            app.add_plugins(frame_log::FrameLogPlugin);
+        }
         if std::env::var_os("DIORAMA_GPU_TIMES").is_some() {
             app.add_plugins(gpu::GpuTimesPlugin);
         }
@@ -82,6 +90,9 @@ impl Plugin for DevPlugin {
         }
         if let Some(brutes) = env_number::<u32>("DIORAMA_BRUTES") {
             app.insert_resource(BruteBatch(brutes));
+        }
+        if let Some(money) = env_number::<u32>("DIORAMA_MONEY") {
+            app.insert_resource(Wallet::new(money));
         }
         if let Some(seed) = env_number::<u64>("DIORAMA_SEED") {
             app.insert_resource(RunSeed(seed));

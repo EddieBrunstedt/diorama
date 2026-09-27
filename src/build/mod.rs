@@ -1,21 +1,32 @@
-//! Building with the mouse. Every click changes the grid right away.
+//! Building with the mouse. Every click changes the grid right away, and pays for it.
 //!
-//! - Left click places a wall. Drag to draw a straight line (it follows the axis you dragged
-//!   further along); walls appear and disappear live as the line changes.
-//! - Right click removes, and right drag removes along a line.
+//! - 1–4 (or the build panel, [`panel`]) pick what a left click builds: a wall or one of the
+//!   towers.
+//! - Left click builds it. Drag to draw a straight line (it follows the axis you dragged further
+//!   along); structures appear and disappear live as the line changes, until the money runs out.
+//! - Left click on a damaged wall or tower repairs it, as far as the money goes (drag to repair
+//!   along a line).
+//! - Right click sells, and right drag sells along a line.
 //! - Esc, or the other mouse button, cancels a drag in progress.
-//! - Ctrl+Z undoes the last click or drag, Ctrl+Shift+Z (or Ctrl+Y) redoes.
+//! - Ctrl+Z undoes the last click or drag, Ctrl+Shift+Z (or Ctrl+Y) redoes, money and all.
+//! - Releasing the horde stands in for starting a wave (until milestone 5): it commits what was
+//!   built, which now sells at a loss, and clears the undo history.
 //!
-//! The rules and the history are plain data in [`history`]. Whatever changes the grid sends a
-//! [`StructureChanged`] for each cell, which the visuals follow.
+//! The rules and the history are plain data in [`history`] (and the prices in
+//! [`crate::economy`]). Whatever changes the grid sends a [`StructureChanged`] for each cell,
+//! which the visuals follow.
 
 mod highlight;
 pub mod history;
+mod panel;
 
-use crate::grid::{Change, Grid, Structure};
+use crate::economy::{CantAfford, Wallet};
+use crate::grid::{Change, Grid, Kind};
+use crate::horde::HordeReleased;
 use crate::pointer::{Pointer, PointerSystems, cell_top};
 use bevy::prelude::*;
 use history::{History, Stroke, StrokeKind};
+pub use panel::PanelHovered;
 
 pub struct BuildPlugin;
 
@@ -23,12 +34,13 @@ impl Plugin for BuildPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<History>()
             .init_resource::<ActiveStroke>()
+            .init_resource::<Tool>()
             .add_message::<StructureChanged>()
             .add_message::<BuildDenied>()
-            .add_plugins(highlight::HighlightPlugin)
+            .add_plugins((highlight::HighlightPlugin, panel::PanelPlugin))
             .add_systems(
                 Update,
-                (strokes, undo_redo)
+                (commit, pick_tool, strokes, undo_redo)
                     .chain()
                     .in_set(BuildSystems)
                     .after(PointerSystems),
@@ -54,15 +66,54 @@ pub struct BuildDenied {
 #[derive(Resource, Default)]
 pub struct ActiveStroke(pub Option<(Stroke, MouseButton)>);
 
+/// What a left click builds.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tool(pub Kind);
+
+/// The key that picks each kind, in [`Kind::ALL`] order.
+pub const TOOL_KEYS: [(KeyCode, &str); 4] = [
+    (KeyCode::Digit1, "1"),
+    (KeyCode::Digit2, "2"),
+    (KeyCode::Digit3, "3"),
+    (KeyCode::Digit4, "4"),
+];
+
+fn pick_tool(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<Tool>) {
+    if keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) {
+        return;
+    }
+    for ((key, _), kind) in TOOL_KEYS.into_iter().zip(Kind::ALL) {
+        if keys.just_pressed(key) {
+            tool.set_if_neq(Tool(kind));
+        }
+    }
+}
+
+/// Letting the horde out commits the build: it sells at a loss from now on, and can't be undone.
+fn commit(
+    mut released: MessageReader<HordeReleased>,
+    mut grid: ResMut<Grid>,
+    mut history: ResMut<History>,
+) {
+    if released.read().count() > 0 {
+        grid.commit();
+        history.clear();
+    }
+}
+
 fn strokes(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     pointer: Res<Pointer>,
+    tool: Res<Tool>,
+    panel: Res<PanelHovered>,
     mut grid: ResMut<Grid>,
+    mut wallet: ResMut<Wallet>,
     mut active: ResMut<ActiveStroke>,
     mut history: ResMut<History>,
     mut changed: MessageWriter<StructureChanged>,
     mut denied: MessageWriter<BuildDenied>,
+    mut broke: MessageWriter<CantAfford>,
 ) {
     let mut send =
         |changes: Vec<Change>| changed.write_batch(changes.into_iter().map(StructureChanged));
@@ -73,7 +124,7 @@ fn strokes(
             _ => MouseButton::Left,
         };
         if keys.just_pressed(KeyCode::Escape) || buttons.just_pressed(other) {
-            send(stroke.cancel(&mut grid));
+            send(stroke.cancel(&mut grid, &mut wallet));
             return;
         }
         // A drag picks against the map as it was when it began: walls it places don't pull its
@@ -85,7 +136,10 @@ fn strokes(
             })
         });
         if let Some(cell) = end {
-            send(stroke.update(&mut grid, cell));
+            send(stroke.update(&mut grid, &mut wallet, cell));
+            if stroke.take_short() {
+                broke.write(CantAfford);
+            }
         }
         if buttons.pressed(button) {
             active.0 = Some((stroke, button));
@@ -95,15 +149,31 @@ fn strokes(
         return;
     }
 
+    // Clicks on the build panel are for the panel.
+    if panel.0 {
+        return;
+    }
     let Some(cell) = pointer.cell else {
         return;
     };
+    // A left click on something damaged repairs it; anywhere else it builds.
+    let damaged = grid
+        .structure(cell)
+        .is_some_and(|structure| structure.damaged());
+    let left = if damaged {
+        StrokeKind::Repair
+    } else {
+        StrokeKind::Place(tool.0)
+    };
     for (button, kind) in [
-        (MouseButton::Left, StrokeKind::Place(Structure::WALL)),
+        (MouseButton::Left, left),
         (MouseButton::Right, StrokeKind::Remove),
     ] {
         if buttons.just_pressed(button) {
-            let (stroke, changes) = Stroke::begin(kind, cell, &mut grid);
+            let (mut stroke, changes) = Stroke::begin(kind, cell, &mut grid, &mut wallet);
+            if stroke.take_short() {
+                broke.write(CantAfford);
+            }
             if stroke.is_empty() {
                 denied.write(BuildDenied { cell });
             }
@@ -118,8 +188,10 @@ fn undo_redo(
     keys: Res<ButtonInput<KeyCode>>,
     active: Res<ActiveStroke>,
     mut grid: ResMut<Grid>,
+    mut wallet: ResMut<Wallet>,
     mut history: ResMut<History>,
     mut changed: MessageWriter<StructureChanged>,
+    mut broke: MessageWriter<CantAfford>,
 ) {
     // Finish (or cancel) the drag first, so undo never tangles with a half-drawn line.
     if active.0.is_some() {
@@ -131,11 +203,18 @@ fn undo_redo(
         return;
     }
     let changes = if keys.just_pressed(KeyCode::KeyZ) && !shift {
-        history.undo(&mut grid)
+        history.undo(&mut grid, &mut wallet)
     } else if (keys.just_pressed(KeyCode::KeyZ) && shift) || keys.just_pressed(KeyCode::KeyY) {
-        history.redo(&mut grid)
+        history.redo(&mut grid, &mut wallet)
     } else {
         return;
     };
-    changed.write_batch(changes.into_iter().map(StructureChanged));
+    match changes {
+        Ok(changes) => {
+            changed.write_batch(changes.into_iter().map(StructureChanged));
+        }
+        Err(_) => {
+            broke.write(CantAfford);
+        }
+    }
 }

@@ -5,7 +5,7 @@
 //! grid `y` runs along world `+Z`, toward the camera.
 
 use crate::tuning::grid::CHUNK_SIZE;
-use crate::tuning::walls::WALL_HP;
+use crate::tuning::structures::{AUTOCANNON_HP, FLAMER_HP, MORTAR_HP, WALL_HP};
 use bevy::{platform::collections::HashMap, prelude::*};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -35,12 +35,60 @@ impl Terrain {
     }
 }
 
-/// Something built on a cell.
+/// What the player can build. Every kind stands on one cell and is part of the maze: the horde
+/// walks around it, or breaks through it (see [`crate::flow`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Kind {
+    #[default]
+    Wall,
+    /// Single target, fast.
+    Autocannon,
+    /// Short range, burns everything in a cone.
+    Flamer,
+    /// Long range, slow, splash.
+    Mortar,
+}
+
+impl Kind {
+    /// Everything that can be built, in the order the build panel shows them.
+    pub const ALL: [Kind; 4] = [Kind::Wall, Kind::Autocannon, Kind::Flamer, Kind::Mortar];
+
+    /// The most HP it can have, which it's built with.
+    pub const fn max_hp(self) -> u32 {
+        match self {
+            Kind::Wall => WALL_HP,
+            Kind::Autocannon => AUTOCANNON_HP,
+            Kind::Flamer => FLAMER_HP,
+            Kind::Mortar => MORTAR_HP,
+        }
+    }
+
+    pub fn is_tower(self) -> bool {
+        self != Kind::Wall
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Wall => "Wall",
+            Kind::Autocannon => "Autocannon",
+            Kind::Flamer => "Flamer",
+            Kind::Mortar => "Mortar",
+        }
+    }
+}
+
+/// Something standing on a cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Structure {
-    /// The horde can break it: `hp` is what it has left. Its HP is part of the structure, so
-    /// undoing the removal of a damaged wall brings it back as damaged as it was.
-    Wall { hp: u32 },
+    /// Something the player built. The horde can break it: `hp` is what it has left. Its HP is
+    /// part of the structure, so undoing the removal of a damaged wall brings it back as damaged
+    /// as it was. `committed` is whether it was built before the last wave started, which
+    /// makes it sell at a loss (see [`crate::economy`]).
+    Built {
+        kind: Kind,
+        hp: u32,
+        committed: bool,
+    },
     /// Part of the Command Center: what the horde is after. It's there from the start and can't
     /// be removed. Its HP is kept for the whole building (see `command_center`).
     CommandCenter,
@@ -48,12 +96,30 @@ pub enum Structure {
 
 impl Structure {
     /// A newly built wall, at full HP.
-    pub const WALL: Structure = Structure::Wall { hp: WALL_HP };
+    #[cfg(test)]
+    pub const WALL: Structure = Structure::new(Kind::Wall);
+
+    /// A newly built `kind`, at full HP and not committed yet.
+    pub const fn new(kind: Kind) -> Self {
+        Structure::Built {
+            kind,
+            hp: kind.max_hp(),
+            committed: false,
+        }
+    }
+
+    /// What was built, if the player built it.
+    pub fn kind(self) -> Option<Kind> {
+        match self {
+            Structure::Built { kind, .. } => Some(kind),
+            Structure::CommandCenter => None,
+        }
+    }
 
     /// Whether the player can remove it.
     pub fn removable(self) -> bool {
         match self {
-            Structure::Wall { .. } => true,
+            Structure::Built { .. } => true,
             Structure::CommandCenter => false,
         }
     }
@@ -61,8 +127,27 @@ impl Structure {
     /// HP left and the most it can have, if the horde can break it.
     pub fn health(self) -> Option<(u32, u32)> {
         match self {
-            Structure::Wall { hp } => Some((hp, WALL_HP)),
+            Structure::Built { kind, hp, .. } => Some((hp, kind.max_hp())),
             Structure::CommandCenter => None,
+        }
+    }
+
+    /// Whether it's missing HP that a repair could put back.
+    pub fn damaged(self) -> bool {
+        self.health().is_some_and(|(hp, max)| hp < max)
+    }
+
+    /// The same structure with `hp` left (capped at its most).
+    pub fn with_hp(self, hp: u32) -> Self {
+        match self {
+            Structure::Built {
+                kind, committed, ..
+            } => Structure::Built {
+                kind,
+                hp: hp.min(kind.max_hp()),
+                committed,
+            },
+            other => other,
         }
     }
 }
@@ -151,7 +236,8 @@ pub enum Blocked {
     Occupied(Structure),
 }
 
-/// One cell's structure changing, e.g. a wall placed (`None` → `Some(Wall)`).
+/// One cell's structure changing, e.g. a wall placed (`None` → `Some(WALL)`) or repaired (a
+/// `Built` one → the same with more HP).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Change {
     pub cell: IVec2,
@@ -160,6 +246,19 @@ pub struct Change {
 }
 
 impl Change {
+    /// Whether it puts HP back on something that stays standing, rather than building or
+    /// removing it.
+    pub fn is_repair(self) -> bool {
+        match (self.before, self.after) {
+            (Some(before), Some(after)) => {
+                before.kind().is_some()
+                    && before.kind() == after.kind()
+                    && after.health() > before.health()
+            }
+            _ => false,
+        }
+    }
+
     /// The change that takes it back.
     pub fn inverse(self) -> Self {
         Self {
@@ -254,21 +353,36 @@ impl Grid {
     /// there (e.g. it already broke).
     pub fn damage(&mut self, cell: IVec2, amount: u32) -> Option<Damage> {
         let data = self.cell_mut(cell)?;
-        let Some(Structure::Wall { hp }) = data.structure else {
-            return None;
-        };
-        let (_, max) = Structure::Wall { hp }.health()?;
+        let structure = data.structure?;
+        let (hp, max) = structure.health()?;
         let left = hp.saturating_sub(amount);
         if left > 0 {
-            data.structure = Some(Structure::Wall { hp: left });
+            data.structure = Some(structure.with_hp(left));
             return Some(Damage::Hurt { hp: left, max });
         }
         self.set_structure(cell, None).map(Damage::Broke)
     }
 
-    /// Applies a change, whatever the cell holds now. Returns it if it changed anything.
+    /// Applies a change if the cell still holds what it starts from, so taking back an edit
+    /// never undoes something that happened since (e.g. a wall the horde broke, or wore down).
+    /// Returns it if it changed anything.
     pub fn apply(&mut self, change: Change) -> Option<Change> {
+        if self.structure(change.cell) != change.before {
+            return None;
+        }
         self.set_structure(change.cell, change.after)
+    }
+
+    /// Marks everything built so far as committed: it now sells at a loss. Not a [`Change`], since
+    /// nothing on the map moves, and not undoable.
+    pub fn commit(&mut self) {
+        for chunk in self.chunks.values_mut() {
+            for cell in &mut chunk.cells {
+                if let Some(Structure::Built { committed, .. }) = &mut cell.structure {
+                    *committed = true;
+                }
+            }
+        }
     }
 
     /// The smallest rectangle of cells covering the whole map (`max` inclusive).
@@ -386,18 +500,99 @@ mod tests {
             grid.damage(cell, 30),
             Some(Damage::Hurt { hp: max - 30, max })
         );
-        assert_eq!(grid.structure(cell), Some(Structure::Wall { hp: max - 30 }));
+        assert_eq!(
+            grid.structure(cell),
+            Some(Structure::WALL.with_hp(max - 30))
+        );
         // The hit that takes the last HP clears the cell, and says what was there.
         let Some(Damage::Broke(change)) = grid.damage(cell, max) else {
             panic!("should break");
         };
-        assert_eq!(change.before, Some(Structure::Wall { hp: max - 30 }));
+        assert_eq!(change.before, Some(Structure::WALL.with_hp(max - 30)));
         assert_eq!(change.after, None);
         assert_eq!(grid.structure(cell), None);
         assert_eq!(grid.damage(cell, 1), None, "already broken");
         // The Command Center isn't broken through the grid.
         grid.set_structure(cell, Some(Structure::CommandCenter));
         assert_eq!(grid.damage(cell, 1), None);
+    }
+
+    #[test]
+    fn towers_break_like_walls() {
+        let mut grid = two_by_two();
+        let cell = IVec2::new(1, 1);
+        grid.set_structure(cell, Some(Structure::new(Kind::Mortar)));
+        let max = Kind::Mortar.max_hp();
+        assert_eq!(
+            grid.damage(cell, 20),
+            Some(Damage::Hurt { hp: max - 20, max })
+        );
+        assert!(grid.structure(cell).unwrap().damaged());
+        assert!(matches!(grid.damage(cell, max), Some(Damage::Broke(_))));
+        assert_eq!(grid.structure(cell), None);
+    }
+
+    #[test]
+    fn repairs_and_commits() {
+        let mut grid = two_by_two();
+        let cell = IVec2::new(0, 3);
+        grid.set_structure(cell, Some(Structure::WALL));
+        grid.damage(cell, 60);
+        let worn = grid.structure(cell).unwrap();
+        let repair = grid.set_structure(cell, Some(worn.with_hp(999))).unwrap();
+        assert!(repair.is_repair());
+        assert_eq!(
+            grid.structure(cell),
+            Some(Structure::WALL),
+            "capped at full HP"
+        );
+        assert!(
+            !repair.inverse().is_repair(),
+            "taking HP off isn't a repair"
+        );
+        let removed = Change {
+            cell,
+            before: Some(Structure::WALL),
+            after: None,
+        };
+        assert!(!removed.is_repair());
+        let swapped = Change {
+            cell,
+            before: Some(Structure::WALL.with_hp(10)),
+            after: Some(Structure::new(Kind::Flamer)),
+        };
+        assert!(!swapped.is_repair(), "another kind");
+
+        grid.commit();
+        assert_eq!(
+            grid.structure(cell),
+            Some(Structure::Built {
+                kind: Kind::Wall,
+                hp: WALL_HP,
+                committed: true
+            })
+        );
+        grid.set_structure(IVec2::new(-1, -1), Some(Structure::CommandCenter));
+        grid.commit();
+        assert_eq!(
+            grid.structure(IVec2::new(-1, -1)),
+            Some(Structure::CommandCenter)
+        );
+    }
+
+    #[test]
+    fn changes_only_apply_to_what_they_started_from() {
+        let mut grid = two_by_two();
+        let cell = IVec2::new(4, 4);
+        let placed = grid.set_structure(cell, Some(Structure::WALL)).unwrap();
+        // The horde wears it down: taking the placement back no longer matches.
+        grid.damage(cell, 10);
+        assert_eq!(grid.apply(placed.inverse()), None);
+        assert!(grid.structure(cell).is_some());
+        // And once it broke, doing it again doesn't put it back over whatever is there.
+        grid.damage(cell, 1000);
+        grid.set_structure(cell, Some(Structure::new(Kind::Flamer)));
+        assert_eq!(grid.apply(placed), None);
     }
 
     #[test]
@@ -410,7 +605,7 @@ mod tests {
         grid.apply(removed.inverse());
         assert_eq!(
             grid.structure(cell),
-            Some(Structure::Wall { hp: WALL_HP - 40 })
+            Some(Structure::WALL.with_hp(WALL_HP - 40))
         );
     }
 

@@ -1,20 +1,23 @@
 //! Structures as the player sees them. They follow the grid through [`StructureChanged`]:
-//! a new structure drops in, slams down (squash, dust, a little shake), and a removed one pops
-//! up and shrinks away in a spray of rubble.
+//! a new structure drops in, slams down (squash, dust, a little shake; towers land heavier), and
+//! a removed one pops up and shrinks away in a spray of rubble. A repaired one stays put and pops
+//! with a few sparks.
 //!
 //! Walls show their wear: each hit shudders the wall and chips off concrete flecks, it looks
 //! cracked below two thirds of its HP and battered (chunks gone, rebar showing) below a third,
-//! and when it breaks it sinks and crumbles in a burst of rubble and dust.
+//! and when it breaks it sinks and crumbles in a burst of rubble and dust. Towers shudder and
+//! chip the same way, and smoke when they're low (see [`crate::towers`]).
 
 use crate::build::{BuildDenied, BuildSystems, StructureChanged};
 use crate::command_center;
 use crate::flow::Class;
-use crate::grid::{Structure, cell_center};
-use crate::juice::{Burst, Particles, Shake, Squash, Tween, TweenDone, TweenTarget, Wobble};
+use crate::grid::{Kind, Structure, cell_center};
+use crate::juice::{Burst, Particles, Shake, Spray, Squash, Tween, TweenDone, TweenTarget, Wobble};
 use crate::palette;
 use crate::shapes::{BoxMesh, ShapeMaterial, shade};
+use crate::towers::{Tower, TowerAssets, meshes};
 use crate::tuning::juice::*;
-use crate::walls::{WallBroken, WallDamaged, WallSystems};
+use crate::wear::{StructureBroken, StructureDamaged, WearSystems};
 use bevy::{platform::collections::HashMap, prelude::*};
 
 /// A wall's height, and its width (less than a cell, so neighboring walls show a seam).
@@ -26,7 +29,10 @@ const HAZARD_BAND: (f32, f32) = (0.2, 0.08);
 /// How tall a structure stands, from the ground it's on to its top.
 pub fn structure_height(structure: Structure) -> f32 {
     match structure {
-        Structure::Wall { .. } => WALL_HEIGHT,
+        Structure::Built {
+            kind: Kind::Wall, ..
+        } => WALL_HEIGHT,
+        Structure::Built { kind, .. } => meshes::layout(kind).height,
         Structure::CommandCenter => command_center::HEIGHT,
     }
 }
@@ -42,7 +48,7 @@ impl Plugin for StructuresPlugin {
                 Update,
                 (
                     (follow_changes, wobble_denied).after(BuildSystems),
-                    show_wear.after(WallSystems),
+                    show_wear.after(WearSystems),
                 ),
             )
             .add_observer(slam);
@@ -235,24 +241,56 @@ struct StructureView;
 fn follow_changes(
     mut commands: Commands,
     mut changes: MessageReader<StructureChanged>,
-    mut broken: MessageReader<WallBroken>,
+    mut broken: MessageReader<StructureBroken>,
     mut views: ResMut<StructureViews>,
     assets: Res<StructureAssets>,
+    tower_assets: Res<TowerAssets>,
     material: Res<ShapeMaterial>,
     transforms: Query<(&Transform, Has<Tween>), With<StructureView>>,
+    mut repaired: Query<(&mut Squash, &mut Mesh3d, &mut Wear), With<StructureView>>,
     mut particles: Particles,
     mut shake: ResMut<Shake>,
 ) {
-    let broken: Vec<WallBroken> = broken.read().copied().collect();
+    let broken: Vec<StructureBroken> = broken.read().copied().collect();
     let changes: Vec<_> = changes.read().map(|changed| changed.0).collect();
     let arriving = changes
         .iter()
-        .filter(|change| change.after.is_some())
+        .filter(|change| change.after.is_some() && !change.is_repair())
         .count();
     let stagger = LINE_STAGGER.min(MAX_RIPPLE_SECONDS / arriving.max(1) as f32);
     let mut landing = 0;
     for change in changes {
         let center = cell_center(change.cell);
+        // A repair keeps the structure standing: it pops, sparks and looks less worn.
+        if change.is_repair() {
+            let Some(after) = change.after else { continue };
+            if let Some(&entity) = views.0.get(&change.cell)
+                && let Ok((mut squash, mut mesh, mut wear)) = repaired.get_mut(entity)
+            {
+                squash.pulse(REPAIR_POP);
+                *wear = Wear::of_structure(after);
+                if after.kind() == Some(Kind::Wall) {
+                    mesh.0 = assets.wall(*wear);
+                }
+                particles.spray(
+                    &mut commands,
+                    center + Vec3::Y * structure_height(after) * 0.8,
+                    Spray {
+                        colors: &palette::SPARKS,
+                        count: 8,
+                        size: 0.06,
+                        direction: Vec3::Y,
+                        cone: 1.0,
+                        speed: (1.0, 2.5),
+                        gravity: 0.6,
+                        grow: 1.0,
+                        lifetime: 0.35,
+                        glow: true,
+                    },
+                );
+            }
+            continue;
+        }
         if change.before.is_some()
             && let Some(entity) = views.0.remove(&change.cell)
         {
@@ -286,7 +324,10 @@ fn follow_changes(
         }
         if let Some(structure) = change.after {
             let mesh = match structure {
-                Structure::Wall { .. } => assets.wall(Wear::of_structure(structure)),
+                Structure::Built {
+                    kind: Kind::Wall, ..
+                } => assets.wall(Wear::of_structure(structure)),
+                Structure::Built { kind, .. } => tower_assets.base(kind),
                 // Never built or removed: it stands from the start (see `command_center`).
                 Structure::CommandCenter => continue,
             };
@@ -314,6 +355,11 @@ fn follow_changes(
                     Wear::of_structure(structure),
                 ))
                 .id();
+            if let Some(kind) = structure.kind().filter(|kind| kind.is_tower()) {
+                commands
+                    .entity(entity)
+                    .insert(Tower::new(kind, change.cell));
+            }
             views.0.insert(change.cell, entity);
         }
     }
@@ -322,7 +368,7 @@ fn follow_changes(
 fn shrink_away(commands: &mut Commands, entity: Entity, from: Vec3) {
     commands
         .entity(entity)
-        .remove::<(StructureView, Squash, Wobble, Tween)>()
+        .remove::<(StructureView, Squash, Wobble, Tween, Tower)>()
         .insert(
             Tween::new(
                 TweenTarget::Scale {
@@ -341,7 +387,7 @@ fn shrink_away(commands: &mut Commands, entity: Entity, from: Vec3) {
 fn crumble(commands: &mut Commands, entity: Entity, from: Vec3) {
     commands
         .entity(entity)
-        .remove::<(StructureView, Squash, Wobble, Tween)>()
+        .remove::<(StructureView, Squash, Wobble, Tween, Tower)>()
         .insert(
             Tween::new(
                 TweenTarget::Scale {
@@ -357,7 +403,7 @@ fn crumble(commands: &mut Commands, entity: Entity, from: Vec3) {
 }
 
 /// A big burst of rubble and dust where a wall broke, thrown away from what broke it.
-fn break_apart(particles: &mut Particles, commands: &mut Commands, wall: &WallBroken) {
+fn break_apart(particles: &mut Particles, commands: &mut Commands, wall: &StructureBroken) {
     let center = cell_center(wall.cell);
     let rubble = match wall.by {
         Class::Swarmer => RUBBLE_SPREAD,
@@ -394,11 +440,17 @@ fn break_apart(particles: &mut Particles, commands: &mut Commands, wall: &WallBr
 /// Walls taking hits: they shudder, chip, and look more worn as their HP drops.
 fn show_wear(
     mut commands: Commands,
-    mut damaged: MessageReader<WallDamaged>,
+    mut damaged: MessageReader<StructureDamaged>,
     views: Res<StructureViews>,
     assets: Res<StructureAssets>,
     mut walls: Query<
-        (&Transform, Option<&Wobble>, &mut Mesh3d, &mut Wear),
+        (
+            &Transform,
+            Option<&Wobble>,
+            &mut Mesh3d,
+            &mut Wear,
+            Has<Tower>,
+        ),
         (With<StructureView>, Without<Tween>),
     >,
     mut particles: Particles,
@@ -408,13 +460,16 @@ fn show_wear(
         let Some(&entity) = views.0.get(&hit.cell) else {
             continue;
         };
-        let Ok((transform, wobble, mut mesh, mut wear)) = walls.get_mut(entity) else {
+        let Ok((transform, wobble, mut mesh, mut wear, tower)) = walls.get_mut(entity) else {
             continue;
         };
         let now = Wear::of(hit.hp, hit.max);
         if *wear != now {
             *wear = now;
-            mesh.0 = assets.wall(now);
+            // Towers have one look; they smoke when they're low instead.
+            if !tower {
+                mesh.0 = assets.wall(now);
+            }
         }
         let brute = hit.by == Class::Brute;
         // Tip away from whatever hit it. Swarmer bites don't restart a shudder already going,
@@ -462,22 +517,28 @@ fn show_wear(
 fn slam(
     done: On<TweenDone>,
     mut commands: Commands,
-    mut views: Query<(&Transform, &mut Squash), With<StructureView>>,
+    mut views: Query<(&Transform, &mut Squash, Has<Tower>), With<StructureView>>,
     mut particles: Particles,
     mut shake: ResMut<Shake>,
 ) {
-    let Ok((transform, mut squash)) = views.get_mut(done.entity) else {
+    let Ok((transform, mut squash, tower)) = views.get_mut(done.entity) else {
         return;
     };
     squash.pulse(LAND_SQUASH);
-    shake.add_capped(LAND_SHAKE, LAND_SHAKE_MAX);
+    // Towers are heavier: a bigger bump and more dust.
+    let (bump, dust) = if tower {
+        (TOWER_LAND_SHAKE, TOWER_DUST_COUNT)
+    } else {
+        (LAND_SHAKE, DUST_COUNT)
+    };
+    shake.add_capped(bump, LAND_SHAKE_MAX.max(bump));
     particles.burst(
         &mut commands,
         transform.translation + Vec3::Y * 0.05,
         WALL_WIDTH / 2.0,
         Burst {
             colors: &palette::DUST,
-            count: DUST_COUNT,
+            count: dust,
             size: DUST_SIZE,
             spread: DUST_SPREAD,
             lift: DUST_LIFT,

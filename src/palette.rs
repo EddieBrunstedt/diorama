@@ -21,6 +21,28 @@ pub const BASE_LIGHT: Color = Color::srgb(0.45, 0.95, 1.0);
 /// How the Command Center glows for a moment when it's hit.
 pub const BASE_HIT: Color = Color::srgb(1.0, 0.3, 0.15);
 
+/// Towers: dark gunmetal turrets, red fuel tanks on the flamer, sandbags around the mortar, and
+/// the flamer's pilot light.
+pub const GUNMETAL: Color = Color::srgb(0.2, 0.22, 0.24);
+pub const FUEL: Color = Color::srgb(0.72, 0.2, 0.12);
+pub const SANDBAG: Color = Color::srgb(0.56, 0.5, 0.36);
+pub const PILOT_LIGHT: Color = Color::srgb(1.0, 0.55, 0.1);
+
+/// Shots: a hot yellow muzzle flash and tracer, sparks where they hit, fire from yellow to
+/// deep orange, grey smoke, and a mortar blast's ring and light.
+pub const MUZZLE_FLASH: Color = Color::srgb(1.0, 0.92, 0.55);
+pub const TRACER: Color = Color::srgb(1.0, 0.85, 0.4);
+pub const SPARKS: [Color; 2] = [Color::srgb(1.0, 0.9, 0.5), Color::srgb(1.0, 0.7, 0.3)];
+pub const FLAME: [Color; 4] = [
+    Color::srgb(1.0, 0.92, 0.45),
+    Color::srgb(1.0, 0.7, 0.2),
+    Color::srgb(1.0, 0.45, 0.1),
+    Color::srgb(0.9, 0.25, 0.08),
+];
+pub const SMOKE: [Color; 2] = [Color::srgb(0.2, 0.2, 0.2), Color::srgb(0.3, 0.29, 0.28)];
+pub const BLAST_RING: Color = Color::srgb(1.0, 0.75, 0.4);
+pub const BLAST_LIGHT: Color = Color::srgb(1.0, 0.6, 0.25);
+
 /// The horde: purple chitin, lighter on the back so a crowd reads against the dark ground, with
 /// acid-green eyes. Nests sit in a crust of dark creep around a glowing pit.
 pub const CHITIN: Color = Color::srgb(0.62, 0.24, 0.5);
@@ -36,6 +58,14 @@ pub const BONE: Color = Color::srgb(0.86, 0.8, 0.66);
 pub const GIBS: [Color; 3] = [
     Color::srgb(0.62, 0.24, 0.5),
     Color::srgb(0.4, 0.14, 0.34),
+    Color::srgb(0.75, 1.0, 0.2),
+];
+
+/// A brute bursting: darker shell, bone, and acid.
+pub const BRUTE_GIBS: [Color; 4] = [
+    Color::srgb(0.36, 0.13, 0.27),
+    Color::srgb(0.52, 0.2, 0.38),
+    Color::srgb(0.86, 0.8, 0.66),
     Color::srgb(0.75, 1.0, 0.2),
 ];
 
@@ -55,6 +85,11 @@ pub const REBAR: Color = Color::srgb(0.45, 0.25, 0.15);
 pub const HOVER_OK: Color = Color::srgb(0.45, 0.95, 1.0);
 pub const HOVER_BLOCKED: Color = Color::srgb(1.0, 0.25, 0.2);
 pub const HOVER_REMOVE: Color = Color::srgb(1.0, 0.6, 0.15);
+/// A damaged structure a click would repair.
+pub const HOVER_REPAIR: Color = Color::srgb(0.4, 1.0, 0.45);
+/// Range rings: how far a tower reaches, and (for the mortar) how close it can't.
+pub const RANGE_RING: Color = Color::srgba(0.45, 0.95, 1.0, 0.7);
+pub const RANGE_MIN: Color = Color::srgba(1.0, 0.35, 0.25, 0.6);
 
 /// The path preview: where the horde will go, in the horde's color, and red where it will go
 /// through a wall.
@@ -75,3 +110,12 @@ pub const HEALTH_EMPTY: Color = Color::srgba(1.0, 1.0, 1.0, 0.12);
 pub const HEALTH_LOW: Color = Color::srgb(1.0, 0.3, 0.15);
 /// A hovered wall's HP bar: the backing behind it.
 pub const WALL_BAR_BACK: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
+/// Money: the counter and the pips flying to it, and the counter's flash when something can't
+/// be paid for.
+pub const MONEY: Color = Color::srgb(1.0, 0.82, 0.3);
+pub const BROKE: Color = Color::srgb(1.0, 0.3, 0.2);
+/// The build panel: its buttons, the chosen one's border, and prices that can't be paid.
+pub const PANEL: Color = Color::srgba(0.05, 0.06, 0.08, 0.8);
+pub const PANEL_HOVER: Color = Color::srgba(0.12, 0.14, 0.18, 0.9);
+pub const PANEL_BORDER: Color = Color::srgba(1.0, 1.0, 1.0, 0.12);
+pub const PANEL_CHOSEN: Color = Color::srgb(0.45, 0.95, 1.0);

@@ -6,10 +6,15 @@
 //! Space releases a batch of swarmers and B a few brutes ([`brute`]), until milestone 5 brings
 //! waves. Thousands of swarmers can be on the map at once: they share one mesh and one material
 //! so they're drawn in a few batches, move in parallel, and find their neighbors through a
-//! spatial hash ([`crowd`], plain data).
+//! spatial hash ([`crowd`], plain data). Towers find their targets through the same hash
+//! ([`EnemyIndex`]).
+//!
+//! Every enemy has [`Health`]. Whatever hurts them runs in [`DamageSystems`], and the ones that
+//! ran out burst into gibs and send an [`EnemyKilled`] ([`death`]).
 
 mod brute;
 pub mod crowd;
+mod death;
 mod nest;
 
 use crate::command_center::CommandCenterHit;
@@ -22,10 +27,11 @@ use crate::tuning::horde::*;
 use crate::tuning::juice::{
     BITE_LUNGE, BITE_SECONDS, EMERGE_DEPTH, EMERGE_SECONDS, SCUTTLE_HOP, SCUTTLE_STRIDE,
 };
-use crate::walls::WallHit;
-use bevy::{prelude::*, utils::Parallel};
+use crate::wear::StructureHit;
+use bevy::{ecs::system::SystemParam, prelude::*, utils::Parallel};
 pub use brute::{Brute, BruteBatch, BruteQueue};
 use crowd::{CrowdIndex, push_out, separation, shove, steer, touches, walls_in_the_way};
+pub use death::{DeathSystems, EnemyKilled};
 
 /// Longest step the crowd moves at once, so a hitch can't throw swarmers through walls.
 const MAX_STEP: f32 = 1.0 / 20.0;
@@ -40,7 +46,9 @@ impl Plugin for HordePlugin {
             .init_resource::<ShapeMaterial>()
             .init_resource::<Crowd>()
             .add_message::<SwarmersEmerged>()
-            .add_plugins((nest::NestPlugin, brute::BrutePlugin))
+            .add_message::<HordeReleased>()
+            .add_plugins((nest::NestPlugin, brute::BrutePlugin, death::DeathPlugin))
+            .configure_sets(Update, DamageSystems.after(HordeSystems))
             .add_systems(Startup, seed_horde)
             .add_systems(
                 Update,
@@ -65,6 +73,61 @@ impl Plugin for HordePlugin {
 /// Moves the horde. Whatever reacts to swarmers runs after it.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HordeSystems;
+
+/// Hurts the horde (towers, and later abilities). Runs after the horde moves; the dead are
+/// cleared away after it.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DamageSystems;
+
+/// The player let the horde out (Space or B). Until milestone 5's waves, that stands in for
+/// starting a wave: it commits the build.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct HordeReleased;
+
+/// What an enemy has left. At zero or below it's dead, and cleared away at the end of the damage
+/// step.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Health(pub f32);
+
+impl Health {
+    pub fn is_alive(self) -> bool {
+        self.0 > 0.0
+    }
+
+    /// Takes `amount` off. True if that's the hit that killed it.
+    pub fn hurt(&mut self, amount: f32) -> bool {
+        let alive = self.is_alive();
+        self.0 -= amount;
+        alive && !self.is_alive()
+    }
+}
+
+/// Where the horde is, for towers finding targets. Positions are from this frame's crowd step:
+/// good for finding who's near, but read an enemy's `Transform` for where it is exactly.
+#[derive(SystemParam)]
+pub struct EnemyIndex<'w> {
+    swarmers: Res<'w, Crowd>,
+    brutes: Res<'w, brute::BruteCrowd>,
+}
+
+impl EnemyIndex<'_> {
+    /// Every enemy in the buckets within `radius` of `at` (a superset of those that close), with
+    /// its class.
+    pub fn near(&self, at: Vec2, radius: f32) -> impl Iterator<Item = (Vec2, Entity, Class)> {
+        let swarmers = self
+            .swarmers
+            .index
+            .near(at, radius)
+            .map(|&(point, entity)| (point, entity, Class::Swarmer));
+        // Brutes are big: reach for their middles as far as their edge.
+        let brutes = self
+            .brutes
+            .index
+            .near(at, radius + BRUTE_RADIUS)
+            .map(|&(point, entity)| (point, entity, Class::Brute));
+        swarmers.chain(brutes)
+    }
+}
 
 /// How many swarmers Space releases (`DIORAMA_BATCH` overrides it, see [`crate::dev`]).
 #[derive(Resource, Clone, Copy, Debug)]
@@ -106,6 +169,13 @@ pub struct Swarmer {
     /// Seconds until it can bite again, and what's left of its bite's lunge.
     bite_cooldown: f32,
     lunge: f32,
+}
+
+impl Swarmer {
+    /// How fast and which way it's going, in cells per second.
+    pub fn velocity(&self) -> Vec2 {
+        self.velocity
+    }
 }
 
 #[derive(Resource)]
@@ -173,7 +243,7 @@ fn swarmer_mesh() -> Mesh {
 
 /// The spatial hash, kept between frames so its memory is reused.
 #[derive(Resource)]
-struct Crowd {
+pub(crate) struct Crowd {
     index: CrowdIndex<Entity>,
     positions: Vec<(Vec2, Entity)>,
 }
@@ -192,11 +262,13 @@ fn release_batch(
     batch: Res<BatchSize>,
     landmarks: Res<Landmarks>,
     mut queue: ResMut<SpawnQueue>,
+    mut released: MessageWriter<HordeReleased>,
 ) {
     if !keys.just_pressed(KeyCode::Space) || landmarks.nests.is_empty() {
         return;
     }
     queue.waiting += batch.0;
+    released.write(HordeReleased);
     let steady = SPAWN_RATE * landmarks.nests.len() as f32;
     queue.rate = steady.max(queue.waiting as f32 / BATCH_MAX_SECONDS);
 }
@@ -243,6 +315,7 @@ fn spawn_swarmers(
                     bite_cooldown: rng.range(0.0, SWARMER_BITE_INTERVAL),
                     lunge: 0.0,
                 },
+                Health(SWARMER_HP),
                 Mesh3d(assets.mesh.clone()),
                 MeshMaterial3d(material.0.clone()),
                 Transform::from_xyz(at.x, -EMERGE_DEPTH, at.y)
@@ -270,8 +343,8 @@ fn move_swarmers(
     brutes: Res<brute::BruteCrowd>,
     mut crowd: ResMut<Crowd>,
     mut swarmers: Query<(Entity, &mut Swarmer, &mut Transform)>,
-    mut bites: Local<Parallel<Vec<WallHit>>>,
-    mut hits: MessageWriter<WallHit>,
+    mut bites: Local<Parallel<Vec<StructureHit>>>,
+    mut hits: MessageWriter<StructureHit>,
 ) {
     let dt = time.delta_secs().min(MAX_STEP);
     if dt <= 0.0 {
@@ -350,7 +423,7 @@ fn move_swarmers(
             {
                 swarmer.bite_cooldown = SWARMER_BITE_INTERVAL;
                 swarmer.lunge = BITE_SECONDS;
-                bites.borrow_local_mut().push(WallHit {
+                bites.borrow_local_mut().push(StructureHit {
                     cell,
                     damage: SWARMER_BITE,
                     by: Class::Swarmer,

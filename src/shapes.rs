@@ -95,6 +95,39 @@ impl BoxMesh {
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
+    /// A flat, upward-facing ring around the origin at height `y`, from `inner` to `outer`
+    /// radius, in `segments` pieces.
+    pub fn ring(&mut self, inner: f32, outer: f32, y: f32, segments: usize, color: Color) {
+        let color = color.to_linear().to_f32_array();
+        let point = |radius: f32, i: usize| {
+            let angle = i as f32 / segments as f32 * std::f32::consts::TAU;
+            [angle.cos() * radius, y, angle.sin() * radius]
+        };
+        for i in 0..segments {
+            let base = self.positions.len() as u32;
+            let corners = [
+                point(inner, i),
+                point(outer, i),
+                point(outer, i + 1),
+                point(inner, i + 1),
+            ];
+            for corner in corners {
+                self.positions.push(corner);
+                self.normals.push([0.0, 1.0, 0.0]);
+                self.colors.push(color);
+            }
+            // Wind the pair of triangles so they face up.
+            let [a, b, c, _] = corners.map(Vec3::from);
+            let up = (b - a).cross(c - a).y > 0.0;
+            let order = if up {
+                [0, 1, 2, 0, 2, 3]
+            } else {
+                [0, 2, 1, 0, 3, 2]
+            };
+            self.indices.extend(order.map(|i| base + i));
+        }
+    }
+
     pub fn build(self) -> Mesh {
         Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -119,6 +152,13 @@ pub fn vary(color: Color, rng: &mut Rng, lightness: f32, hue: f32) -> Color {
     c.lightness = (c.lightness + rng.range(-lightness, lightness)).clamp(0.0, 1.0);
     c.hue = (c.hue + rng.range(-hue, hue)).rem_euclid(360.0);
     c.into()
+}
+
+/// A flat ring lying on the ground around the origin (see [`BoxMesh::ring`]).
+pub fn ring_mesh(inner: f32, outer: f32, segments: usize) -> Mesh {
+    let mut mesh = BoxMesh::default();
+    mesh.ring(inner, outer, 0.0, segments, Color::WHITE);
+    mesh.build()
 }
 
 /// Four L-shaped corners framing a 1×1 square centered on the origin, lying on the ground.

@@ -1,10 +1,14 @@
-//! On-screen text: the Command Center's health and the size of the horde at the top, a controls
-//! hint in the bottom-left corner, and a small HP bar over the wall under the cursor. Undo and
-//! redo dim when there's nothing to undo or redo.
+//! On-screen text: the money in the top-left corner ([`money`]), the Command Center's health and
+//! the size of the horde at the top, a controls hint under the money, and a small HP
+//! bar over the wall or tower under the cursor, with what selling or repairing it would pay or
+//! cost. Undo and redo dim when there's nothing to undo or redo.
+
+mod money;
 
 use crate::build::history::History;
 use crate::camera::MainCamera;
 use crate::command_center::CommandCenterHealth;
+use crate::economy::{Wallet, affordable_repair, sell_value};
 use crate::grid::{Grid, cell_center};
 use crate::horde::{Brute, BruteQueue, SpawnQueue, Swarmer};
 use crate::palette;
@@ -12,6 +16,8 @@ use crate::pointer::{Pointer, PointerSystems, column_top};
 use bevy::prelude::*;
 
 const FONT_SIZE: f32 = 15.0;
+/// The hint sits under the money counter, leaving the bottom of the screen to the build panel.
+const HINT_TOP: f32 = 64.0;
 /// How faint a hint line is while it can't do anything.
 const DIMMED_ALPHA: f32 = 0.3;
 /// The health bar's size, and the fraction of HP below which it turns red.
@@ -27,7 +33,8 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_hint, spawn_status, spawn_wall_bar))
+        app.add_plugins(money::MoneyPlugin)
+            .add_systems(Startup, (spawn_hint, spawn_status, spawn_wall_bar))
             .add_systems(
                 Update,
                 (
@@ -147,7 +154,7 @@ fn spawn_hint(mut commands: Commands) {
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(14.0),
-                bottom: Val::Px(12.0),
+                top: Val::Px(HINT_TOP),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(2.0),
                 ..default()
@@ -156,8 +163,12 @@ fn spawn_hint(mut commands: Commands) {
         ))
         .with_children(|hint| {
             for (line, text) in [
-                (HintLine::Always, "Left click: wall (drag for a line)"),
-                (HintLine::Always, "Right click: remove (drag for a line)"),
+                (HintLine::Always, "1-4: pick what to build"),
+                (
+                    HintLine::Always,
+                    "Left click: build, or repair (drag for a line)",
+                ),
+                (HintLine::Always, "Right click: sell (drag for a line)"),
                 (
                     HintLine::Always,
                     "Space: release swarmers    B: release brutes",
@@ -201,6 +212,10 @@ struct WallBarFill;
 #[derive(Component)]
 struct WallBarText;
 
+/// What selling or repairing the hovered structure would pay or cost.
+#[derive(Component)]
+struct WallBarPrices;
+
 fn spawn_wall_bar(mut commands: Commands) {
     commands
         .spawn((
@@ -216,6 +231,13 @@ fn spawn_wall_bar(mut commands: Commands) {
             Pickable::IGNORE,
         ))
         .with_children(|bar| {
+            bar.spawn((
+                WallBarPrices,
+                Text::new(""),
+                TextFont::from_font_size(WALL_BAR_FONT_SIZE),
+                TextColor(palette::MONEY),
+                Pickable::IGNORE,
+            ));
             bar.spawn((
                 WallBarText,
                 Text::new(""),
@@ -246,25 +268,29 @@ fn spawn_wall_bar(mut commands: Commands) {
         });
 }
 
-/// Floats an HP bar over the wall under the cursor.
+/// Floats an HP bar over the wall or tower under the cursor, with what it sells for and what a
+/// repair would cost.
 fn show_wall_bar(
     pointer: Res<Pointer>,
     grid: Res<Grid>,
+    wallet: Res<Wallet>,
     camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
     mut bar: Single<(&mut Node, &mut Visibility, &ComputedNode), With<WallBar>>,
     mut fill: Single<(&mut Node, &mut BackgroundColor), (With<WallBarFill>, Without<WallBar>)>,
-    mut text: Single<&mut Text, With<WallBarText>>,
+    mut text: Single<&mut Text, (With<WallBarText>, Without<WallBarPrices>)>,
+    mut prices: Single<&mut Text, (With<WallBarPrices>, Without<WallBarText>)>,
 ) {
     let (node, visibility, computed) = &mut *bar;
     let (camera, transform) = *camera;
     // Only structures the horde can break have HP to show.
     let above = pointer.cell.and_then(|cell| {
-        let health = grid.structure(cell)?.health()?;
+        let structure = grid.structure(cell)?;
+        let health = structure.health()?;
         let top = cell_center(cell) + Vec3::Y * (column_top(&grid, cell) + WALL_BAR_LIFT);
         let at = camera.world_to_viewport(transform, top).ok()?;
-        Some((at, health))
+        Some((at, structure, health))
     });
-    let Some((at, (hp, max))) = above else {
+    let Some((at, structure, (hp, max))) = above else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
@@ -281,8 +307,22 @@ fn show_wall_bar(
     } else {
         palette::HEALTH
     };
-    let label = format!("{hp} / {max}");
+    let name = structure.kind().map_or("", |kind| kind.name());
+    let label = format!("{name}  {hp} / {max}");
     if text.0 != label {
         text.0 = label;
+    }
+    let mut label = format!("sell +{}", sell_value(structure));
+    if structure.damaged() {
+        let full = crate::economy::repair_cost(structure.kind().unwrap_or_default(), hp, max);
+        let repair = match affordable_repair(structure, wallet.money()) {
+            Some((to, cost)) if to < max => format!("repair -{cost} (to {to})"),
+            Some((_, cost)) => format!("repair -{cost}"),
+            None => format!("repair -{full}"),
+        };
+        label = format!("{label}   {repair}");
+    }
+    if prices.0 != label {
+        prices.0 = label;
     }
 }

@@ -6,7 +6,7 @@
 //! B releases a few, until milestone 5 brings waves.
 
 use super::crowd::{CrowdIndex, push_out, separation, steer, touches, walls_in_the_way};
-use super::{HordeRng, MAX_STEP, SwarmersEmerged, facing};
+use super::{Health, HordeReleased, HordeRng, MAX_STEP, SwarmersEmerged, facing};
 use crate::command_center::CommandCenterHit;
 use crate::flow::{Class, FlowFields};
 use crate::juice::{Shake, Squash};
@@ -18,7 +18,7 @@ use crate::tuning::juice::{
     BRUTE_ROCK, BRUTE_STRIDE, EMERGE_DEPTH, EMERGE_SECONDS, SMASH_DIP, SMASH_REAR,
     SMASH_REAR_SECONDS, SMASH_SECONDS, SMASH_SHAKE, SMASH_SHAKE_MAX, SMASH_SQUASH,
 };
-use crate::walls::WallHit;
+use crate::wear::StructureHit;
 use bevy::prelude::*;
 
 /// How much a brute's speed varies from one to the next (a fraction).
@@ -70,9 +70,16 @@ pub struct Brute {
     heading: Vec2,
 }
 
+impl Brute {
+    /// How fast and which way it's going, in cells per second.
+    pub fn velocity(&self) -> Vec2 {
+        self.velocity
+    }
+}
+
 /// Where the brutes are, for pushing each other apart and for swarmers to get out of their way.
 #[derive(Resource)]
-pub(super) struct BruteCrowd {
+pub(crate) struct BruteCrowd {
     pub(super) index: CrowdIndex<Entity>,
     positions: Vec<(Vec2, Entity)>,
 }
@@ -189,9 +196,11 @@ pub(super) fn release_brutes(
     batch: Res<BruteBatch>,
     landmarks: Res<Landmarks>,
     mut queue: ResMut<BruteQueue>,
+    mut released: MessageWriter<HordeReleased>,
 ) {
     if keys.just_pressed(KeyCode::KeyB) && !landmarks.nests.is_empty() {
         queue.waiting += batch.0;
+        released.write(HordeReleased);
     }
 }
 
@@ -231,6 +240,7 @@ pub(super) fn spawn_brutes(
             slam: 0.0,
             heading: fallback,
         },
+        Health(BRUTE_HP),
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(material.0.clone()),
         Transform::from_xyz(at.x, -EMERGE_DEPTH, at.y)
@@ -246,7 +256,7 @@ pub(super) fn move_brutes(
     fields: Res<FlowFields>,
     mut crowd: ResMut<BruteCrowd>,
     mut brutes: Query<(Entity, &mut Brute, &mut Transform, &mut Squash)>,
-    mut hits: MessageWriter<WallHit>,
+    mut hits: MessageWriter<StructureHit>,
     mut shake: ResMut<Shake>,
 ) {
     let dt = time.delta_secs().min(MAX_STEP);
@@ -309,7 +319,7 @@ pub(super) fn move_brutes(
         if !walls.is_empty() && brute.smash_cooldown <= 0.0 {
             brute.smash_cooldown = BRUTE_SMASH_INTERVAL;
             brute.slam = SMASH_SECONDS;
-            hits.write_batch(walls.iter().map(|&cell| WallHit {
+            hits.write_batch(walls.iter().map(|&cell| StructureHit {
                 cell,
                 damage: BRUTE_SMASH,
                 by: Class::Brute,

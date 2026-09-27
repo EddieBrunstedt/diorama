@@ -205,11 +205,12 @@ fn run_wobbles(
     }
 }
 
-/// One shared unit cube for all particles, and one material per color.
+/// One shared unit cube for all particles, and one material per color (and per glowing or
+/// not).
 #[derive(Resource)]
 struct ParticleAssets {
     cube: Handle<Mesh>,
-    materials: HashMap<[u8; 4], Handle<StandardMaterial>>,
+    materials: HashMap<([u8; 4], bool), Handle<StandardMaterial>>,
 }
 
 impl FromWorld for ParticleAssets {
@@ -239,6 +240,10 @@ pub struct Particle {
     age: f32,
     lifetime: f32,
     size: f32,
+    /// How fast it falls, relative to normal (negative rises, like flames and smoke).
+    gravity: f32,
+    /// How much it grows over its life (1 stays the same size until it shrinks away at the end).
+    grow: f32,
 }
 
 /// How a burst of particles looks and moves.
@@ -255,6 +260,26 @@ pub struct Burst<'a> {
     pub lifetime: f32,
 }
 
+/// A spray of particles in a direction, e.g. flames or sparks.
+#[derive(Clone, Copy, Debug)]
+pub struct Spray<'a> {
+    pub colors: &'a [Color],
+    pub count: usize,
+    pub size: f32,
+    /// Which way they fly (unit length), and how far off it they can go (radians).
+    pub direction: Vec3,
+    pub cone: f32,
+    /// Slowest and fastest speed.
+    pub speed: (f32, f32),
+    /// How fast they fall, relative to normal (negative rises).
+    pub gravity: f32,
+    /// How much they grow over their life.
+    pub grow: f32,
+    pub lifetime: f32,
+    /// Lit by nothing but themselves: fire, sparks, tracers.
+    pub glow: bool,
+}
+
 /// Spawns particles.
 #[derive(SystemParam)]
 pub struct Particles<'w> {
@@ -264,20 +289,73 @@ pub struct Particles<'w> {
 }
 
 impl Particles<'_> {
-    fn material(&mut self, color: Color) -> Handle<StandardMaterial> {
-        let key = color.to_srgba().to_u8_array();
+    fn material(&mut self, color: Color, glow: bool) -> Handle<StandardMaterial> {
+        let key = (color.to_srgba().to_u8_array(), glow);
         let materials = &mut self.materials;
         self.assets
             .materials
             .entry(key)
             .or_insert_with(|| {
+                // Glowing ones are brighter than white can be, so they read as light.
+                let base_color = if glow {
+                    (color.to_linear() * GLOW_BRIGHTNESS).with_alpha(1.0).into()
+                } else {
+                    color
+                };
                 materials.add(StandardMaterial {
-                    base_color: color,
+                    base_color,
                     perceptual_roughness: 0.95,
+                    unlit: glow,
                     ..default()
                 })
             })
             .clone()
+    }
+
+    fn spawn(
+        &mut self,
+        commands: &mut Commands,
+        at: Vec3,
+        particle: Particle,
+        color: Color,
+        glow: bool,
+    ) {
+        let material = self.material(color, glow);
+        let size = particle.size;
+        commands.spawn((
+            particle,
+            Mesh3d(self.assets.cube.clone()),
+            MeshMaterial3d(material),
+            Transform::from_translation(at).with_scale(Vec3::splat(size)),
+            NotShadowCaster,
+        ));
+    }
+
+    /// Particles flying from `at` along a direction, spread over a cone.
+    pub fn spray(&mut self, commands: &mut Commands, at: Vec3, spray: Spray) {
+        let (side, up) = spray.direction.any_orthonormal_pair();
+        for _ in 0..spray.count {
+            let rng = &mut self.rng.0;
+            let off = rng.range(0.0, spray.cone);
+            let around = rng.range(0.0, std::f32::consts::TAU);
+            let direction =
+                spray.direction * off.cos() + (side * around.cos() + up * around.sin()) * off.sin();
+            let particle = Particle {
+                velocity: direction * rng.range(spray.speed.0, spray.speed.1),
+                spin: Vec3::new(
+                    rng.range(-6.0, 6.0),
+                    rng.range(-6.0, 6.0),
+                    rng.range(-6.0, 6.0),
+                ),
+                age: 0.0,
+                lifetime: spray.lifetime * rng.range(0.7, 1.2),
+                size: spray.size * rng.range(0.7, 1.2),
+                gravity: spray.gravity,
+                grow: spray.grow,
+            };
+            let color = rng.pick(spray.colors);
+            self.spawn(commands, at, particle, color, spray.glow);
+        }
     }
 
     /// Particles flying out from `at`, starting spread around it by up to `radius`.
@@ -294,23 +372,17 @@ impl Particles<'_> {
                 rng.range(-9.0, 9.0),
             );
             let start = at + out * radius * rng.range(0.5, 1.0);
-            let size = burst.size * rng.range(0.7, 1.2);
-            let lifetime = burst.lifetime * rng.range(0.7, 1.2);
+            let particle = Particle {
+                velocity,
+                spin,
+                age: 0.0,
+                lifetime: burst.lifetime * rng.range(0.7, 1.2),
+                size: burst.size * rng.range(0.7, 1.2),
+                gravity: 1.0,
+                grow: 1.0,
+            };
             let color = rng.pick(burst.colors);
-            let material = self.material(color);
-            commands.spawn((
-                Particle {
-                    velocity,
-                    spin,
-                    age: 0.0,
-                    lifetime,
-                    size,
-                },
-                Mesh3d(self.assets.cube.clone()),
-                MeshMaterial3d(material),
-                Transform::from_translation(start).with_scale(Vec3::splat(size)),
-                NotShadowCaster,
-            ));
+            self.spawn(commands, start, particle, color, false);
         }
     }
 }
@@ -328,7 +400,7 @@ fn run_particles(
             commands.entity(entity).despawn();
             continue;
         }
-        particle.velocity.y -= PARTICLE_GRAVITY * dt;
+        particle.velocity.y -= PARTICLE_GRAVITY * particle.gravity * dt;
         transform.translation += particle.velocity * dt;
         let bottom = particle.size / 2.0;
         if transform.translation.y < bottom && particle.velocity.y < 0.0 {
@@ -341,9 +413,10 @@ fn run_particles(
         let spin = particle.spin * dt;
         transform.rotation =
             Quat::from_euler(EulerRot::XYZ, spin.x, spin.y, spin.z) * transform.rotation;
-        // Full size for most of its life, then shrink away.
+        // Full size (growing, if it grows) for most of its life, then shrink away.
         let shrink = ((1.0 - life) / 0.4).min(1.0);
-        transform.scale = Vec3::splat(particle.size * shrink);
+        let grow = 1.0 + (particle.grow - 1.0) * life;
+        transform.scale = Vec3::splat(particle.size * grow * shrink);
     }
 }
 
@@ -355,8 +428,6 @@ pub struct Shake {
 }
 
 impl Shake {
-    // Nothing is big enough for an uncapped shake yet; big hits arrive with towers (milestone 4).
-    #[allow(dead_code)]
     pub fn add(&mut self, trauma: f32) {
         self.trauma = (self.trauma + trauma).min(1.0);
     }
@@ -398,8 +469,6 @@ pub struct HitStop {
 
 impl HitStop {
     /// Freezes the game for `seconds` (real time), on top of any freeze still going.
-    // Nothing hits hard enough yet; big hits arrive with towers (milestone 4).
-    #[allow(dead_code)]
     pub fn add(&mut self, seconds: f32) {
         self.left = (self.left + seconds).min(MAX_HIT_STOP);
     }

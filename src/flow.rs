@@ -8,8 +8,8 @@
 //! middle goes where the block's middle is). A 1-cell gap has no block that fits through it
 //! without a wall or rock in it, so brutes can't squeeze through: they break a wall beside it.
 //!
-//! Walls are passable at a cost based on the HP they have left: when a maze makes the detour
-//! longer than chewing through, the field leads through the wall.
+//! Walls and towers are passable at a cost based on the HP they have left: when a maze makes the
+//! detour longer than chewing through, the field leads through them.
 //!
 //! Distances come from Dijkstra's algorithm from the targets outward, but each node's distance is
 //! solved from its neighbors as a wavefront (the fast marching method) rather than summed along
@@ -24,7 +24,7 @@ use crate::grid::{Cell, Grid, Structure};
 use crate::map::Landmarks;
 use crate::tuning::flow::{BRUTE_COST_PER_HP, SWARMER_COST_PER_HP, WEAR_REBUILD_INTERVAL};
 use crate::tuning::horde::BRUTE_RADIUS;
-use crate::walls::WallDamaged;
+use crate::wear::StructureDamaged;
 use bevy::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -58,7 +58,7 @@ struct Rebuilds {
 fn update_fields(
     time: Res<Time>,
     mut changes: MessageReader<StructureChanged>,
-    mut damaged: MessageReader<WallDamaged>,
+    mut damaged: MessageReader<StructureDamaged>,
     grid: Res<Grid>,
     landmarks: Res<Landmarks>,
     mut fields: ResMut<FlowFields>,
@@ -92,7 +92,7 @@ impl Class {
         }
     }
 
-    /// What a wall with `hp` left costs to go through, in cells of open ground.
+    /// What a wall (or tower) with `hp` left costs to go through, in cells of open ground.
     pub fn wall_cost(self, hp: u32) -> f32 {
         let per_hp = match self {
             Class::Swarmer => SWARMER_COST_PER_HP,
@@ -109,7 +109,7 @@ pub fn cell_cost(cell: &Cell, class: Class) -> f32 {
         return f32::INFINITY;
     }
     match cell.structure {
-        Some(Structure::Wall { hp }) => class.wall_cost(hp),
+        Some(Structure::Built { hp, .. }) => class.wall_cost(hp),
         Some(Structure::CommandCenter) | None => 1.0,
     }
 }
@@ -117,7 +117,7 @@ pub fn cell_cost(cell: &Cell, class: Class) -> f32 {
 /// Whether nothing stands in the way on a cell: an enemy can walk across it (the Command Center
 /// counts, since reaching it is the point).
 pub fn is_clear(cell: &Cell) -> bool {
-    cell.terrain.walkable() && !matches!(cell.structure, Some(Structure::Wall { .. }))
+    cell.terrain.walkable() && !matches!(cell.structure, Some(Structure::Built { .. }))
 }
 
 /// A flow field for each enemy class.
@@ -150,7 +150,7 @@ impl FlowFields {
         self.swarmer.is_clear(cell)
     }
 
-    /// Whether a cell holds something the horde can break (a wall).
+    /// Whether a cell holds something the horde can break (a wall or tower).
     pub fn cell_is_breakable(&self, cell: IVec2) -> bool {
         self.swarmer.is_breakable(cell)
     }
@@ -463,7 +463,7 @@ impl FlowField {
         route
     }
 
-    /// The walls a route from `from` breaks through, in order, each once.
+    /// The walls (and towers) a route from `from` breaks through, in order, each once.
     pub fn breaches(&self, from: IVec2, grid: &Grid) -> Vec<IVec2> {
         let mut walls = Vec::new();
         for node in self.route(from) {
@@ -471,7 +471,7 @@ impl FlowField {
                 continue;
             }
             for cell in self.cells(node) {
-                let wall = matches!(grid.structure(cell), Some(Structure::Wall { .. }));
+                let wall = matches!(grid.structure(cell), Some(Structure::Built { .. }));
                 if wall && !walls.contains(&cell) {
                     walls.push(cell);
                 }
@@ -502,7 +502,7 @@ mod tests {
     use super::*;
     use crate::grid::{Chunk, Terrain};
     use crate::tuning::grid::CHUNK_SIZE;
-    use crate::tuning::walls::WALL_HP;
+    use crate::tuning::structures::WALL_HP;
 
     /// One chunk of ground: cells 0..16 on both axes.
     fn open_ground() -> Grid {

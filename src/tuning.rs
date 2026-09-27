@@ -15,9 +15,75 @@ pub mod grid {
     pub const NEST_SIZE: i32 = 2;
 }
 
-/// Walls: what they can take before they break.
-pub mod walls {
+/// What the player builds: what each thing can take before it breaks.
+pub mod structures {
     pub const WALL_HP: u32 = 100;
+    pub const AUTOCANNON_HP: u32 = 150;
+    pub const FLAMER_HP: u32 = 200;
+    pub const MORTAR_HP: u32 = 120;
+}
+
+/// Towers: how far they reach, how fast they fire and how hard they hit. Ranges are in cells
+/// from the middle of the tower's cell, damage in enemy HP.
+pub mod towers {
+    /// Autocannon: single target, hitscan. Fires at the enemy in range that's closest to the
+    /// Command Center (the lowest flow-field distance).
+    pub const AUTOCANNON_RANGE: f32 = 5.5;
+    pub const AUTOCANNON_SHOTS_PER_SECOND: f32 = 4.0;
+    pub const AUTOCANNON_DAMAGE: f32 = 10.0;
+    /// How fast its turret swings (radians per second). It fires only once it's on target.
+    pub const AUTOCANNON_TURN_RATE: f32 = 14.0;
+    /// Between looks for the best target (this often, in seconds), a tower keeps tracking the
+    /// one it has, as long as it's alive and in range. Keeps the cost down in a big horde.
+    pub const RETARGET_SECONDS: f32 = 0.1;
+
+    /// Flamer: burns everything in a cone, pointed at the nearest enemy in range.
+    pub const FLAMER_RANGE: f32 = 2.5;
+    /// The cone's full width (degrees).
+    pub const FLAMER_CONE_DEGREES: f32 = 70.0;
+    pub const FLAMER_DAMAGE_PER_SECOND: f32 = 25.0;
+    pub const FLAMER_TURN_RATE: f32 = 7.0;
+    /// The flamer burns in ticks this far apart (seconds), each dealing that much of its damage
+    /// per second, rather than every frame.
+    pub const FLAMER_TICK_SECONDS: f32 = 0.1;
+
+    /// Mortar: lobs a shell at the biggest clump in range, leading it, and can't hit anything
+    /// closer than its minimum range.
+    pub const MORTAR_MIN_RANGE: f32 = 3.0;
+    pub const MORTAR_RANGE: f32 = 11.0;
+    pub const MORTAR_RELOAD_SECONDS: f32 = 3.0;
+    pub const MORTAR_FLIGHT_SECONDS: f32 = 1.0;
+    pub const MORTAR_TURN_RATE: f32 = 6.0;
+    /// Full damage at the middle of the blast, falling off to `MORTAR_EDGE_DAMAGE` (a fraction)
+    /// at its edge.
+    pub const MORTAR_DAMAGE: f32 = 40.0;
+    pub const MORTAR_SPLASH_RADIUS: f32 = 1.25;
+    pub const MORTAR_EDGE_DAMAGE: f32 = 0.5;
+    /// How many enemies in range it weighs as the middle of a clump when it aims. A brute counts
+    /// as this many swarmers.
+    pub const MORTAR_CANDIDATES: usize = 24;
+    pub const MORTAR_BRUTE_WEIGHT: f32 = 6.0;
+}
+
+/// Money: what things cost, what kills pay, and what selling and repairs are worth.
+pub mod economy {
+    pub const STARTING_MONEY: u32 = 150;
+    pub const WALL_PRICE: u32 = 5;
+    pub const AUTOCANNON_PRICE: u32 = 40;
+    pub const FLAMER_PRICE: u32 = 50;
+    pub const MORTAR_PRICE: u32 = 70;
+    /// What a kill pays, per enemy class.
+    pub const SWARMER_REWARD: u32 = 1;
+    pub const BRUTE_REWARD: u32 = 20;
+    /// Paid when the whole horde is dead (until milestone 5's waves: after each release).
+    pub const WAVE_BONUS: u32 = 25;
+    /// Selling something built before the last wave started pays back this fraction of its price,
+    /// times the fraction of its HP left. Anything built since sells for its full price (times
+    /// its HP left): that's just taking it back.
+    pub const COMMITTED_REFUND: f32 = 0.5;
+    /// Repairing costs this fraction of the price for the HP put back, as a fraction of the most
+    /// it can have. Always cheaper than selling and building a new one.
+    pub const REPAIR_FRACTION: f32 = 0.5;
 }
 
 /// How the horde finds its way: what each cell costs to walk through, in cells of open ground.
@@ -56,6 +122,9 @@ pub mod horde {
     /// Each swarmer is pushed apart from at most this many neighbors a frame, so a dense pile
     /// can't make the cost explode.
     pub const MAX_NEIGHBORS: usize = 12;
+    /// What it takes to kill each class.
+    pub const SWARMER_HP: f32 = 10.0;
+    pub const BRUTE_HP: f32 = 300.0;
     /// Damage a swarmer deals when it reaches the Command Center.
     pub const SWARMER_DAMAGE: u32 = 1;
     /// A swarmer bites a wall in its way for this much, this often (seconds): 5 damage a second.
@@ -216,6 +285,62 @@ pub mod juice {
     pub const PREVIEW_BRUTE_SPACING: f32 = 1.3;
     /// Breach markers pulse this many times a second.
     pub const BREACH_PULSE_RATE: f32 = 1.6;
+
+    /// Towers drop in heavier than walls: more dust and a bigger bump.
+    pub const TOWER_LAND_SHAKE: f32 = 0.32;
+    pub const TOWER_DUST_COUNT: usize = 28;
+    /// A repaired structure pops (stretch) and throws off a few sparks.
+    pub const REPAIR_POP: f32 = 0.25;
+    /// The autocannon: the muzzle flash lasts this long (seconds), the tracer this long, and the
+    /// turret kicks back this far (cells). Sparks fly where it hits.
+    pub const MUZZLE_FLASH_SECONDS: f32 = 0.05;
+    pub const TRACER_SECONDS: f32 = 0.06;
+    pub const TRACER_WIDTH: f32 = 0.05;
+    pub const AUTOCANNON_KICK: f32 = 0.08;
+    pub const SPARK_COUNT: usize = 4;
+    /// The flamer: flame particles a second while it burns, how long each lives, and how big.
+    pub const FLAME_RATE: f32 = 90.0;
+    pub const FLAME_LIFETIME: f32 = 0.35;
+    pub const FLAME_SIZE: f32 = 0.16;
+    /// The mortar: the tube thumps (squash) with a puff of smoke; the shell flies this high
+    /// above the straight line, trailing sparks.
+    pub const MORTAR_THUMP: f32 = -0.3;
+    pub const MORTAR_KICK: f32 = 0.06;
+    pub const SHELL_ARC: f32 = 3.0;
+    /// A shell landing: a flash of light, a shock ring as wide as the blast, dirt and embers, and
+    /// a capped shake.
+    pub const BLAST_FLASH_SECONDS: f32 = 0.18;
+    pub const BLAST_LIGHT: f32 = 400_000.0;
+    pub const BLAST_RING_SECONDS: f32 = 0.3;
+    pub const BLAST_DIRT_COUNT: usize = 14;
+    pub const BLAST_EMBER_COUNT: usize = 12;
+    pub const BLAST_SHAKE: f32 = 0.18;
+    pub const BLAST_SHAKE_MAX: f32 = 0.4;
+    /// A badly damaged tower (below `WALL_BATTERED`) puffs smoke this often (seconds).
+    pub const TOWER_SMOKE_INTERVAL: f32 = 0.25;
+
+    /// Enemies dying: only so many swarmers burst into gibs a frame, however many die. A brute
+    /// flinches (squash) when it's hit, and goes down with a big burst, a heavy shake and a
+    /// moment of hit-stop (real seconds).
+    pub const MAX_DEATH_BURSTS: usize = 12;
+    pub const BRUTE_HIT_SQUASH: f32 = -0.08;
+    pub const BRUTE_GIB_COUNT: usize = 22;
+    pub const BRUTE_DEATH_SHAKE: f32 = 0.35;
+    pub const BRUTE_DEATH_HIT_STOP: f32 = 0.06;
+
+    /// Money: gold pips fly from kills to the counter (at most a few a frame, and so many at
+    /// once), taking this long; the counter pulses when they land. A brute's kill pops its
+    /// reward over it, rising for this long. The counter flashes and shakes when something
+    /// can't be paid for.
+    pub const MAX_PIPS_PER_FRAME: usize = 3;
+    pub const MAX_PIPS: usize = 40;
+    pub const PIP_SECONDS: f32 = 0.55;
+    pub const MONEY_PULSE: f32 = 0.12;
+    pub const REWARD_POP_SECONDS: f32 = 0.9;
+    pub const BROKE_SECONDS: f32 = 0.35;
+
+    /// Fire, sparks, flashes and tracers glow this many times brighter than their color.
+    pub const GLOW_BRIGHTNESS: f32 = 2.5;
 
     /// Longest frame step the springs integrate at once, so a hitch can't make them explode.
     pub const MAX_SPRING_STEP: f32 = 1.0 / 30.0;
