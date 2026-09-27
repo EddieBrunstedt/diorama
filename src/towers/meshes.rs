@@ -40,8 +40,26 @@ pub fn layout(kind: Kind) -> Layout {
             muzzle: MORTAR_TUBE.0 + MORTAR_TUBE.1 * MORTAR_TUBE.2,
             height: 0.3 + 0.74,
         },
+        Kind::ArtilleryCommand => Layout {
+            pivot: ARTILLERY_PIVOT,
+            muzzle: ROCKET_RACK.0 + ROCKET_RACK.1 * ROCKET_RACK.2,
+            height: ARTILLERY_ANTENNA_TOP,
+        },
     }
 }
+
+/// The Artillery Command's turret turns on top of its bunker, and its antenna (on the bunker)
+/// is the tallest part.
+const ARTILLERY_PIVOT: f32 = 0.5;
+const ARTILLERY_ANTENNA_TOP: f32 = 1.18;
+
+/// The Artillery Command's rack of launch tubes: where its middle starts, which way the tubes
+/// point (up and forward) and how long they are.
+const ROCKET_RACK: (Vec3, Vec3, f32) = (
+    Vec3::new(0.0, 0.14, 0.1),
+    Vec3::new(0.0, 0.819, -0.574),
+    0.44,
+);
 
 /// The mortar's tube: where it starts, which way it points (up and forward) and how long it is.
 const MORTAR_TUBE: (Vec3, Vec3, f32) = (
@@ -130,6 +148,43 @@ pub fn base_mesh(kind: Kind) -> Mesh {
                 );
             }
         }
+        Kind::ArtilleryCommand => {
+            // A squat bunker with a slit of lit windows and a hazard edge on its roof.
+            let half = 0.36;
+            mesh.cuboid_graded(
+                Vec3::new(-half, 0.23, -half),
+                Vec3::new(half, ARTILLERY_PIVOT - 0.04, half),
+                shade(palette::CONCRETE, 0.95),
+                shade(palette::CONCRETE, 0.6),
+            );
+            mesh.cuboid(
+                Vec3::new(-half - 0.01, 0.34, half - 0.2),
+                Vec3::new(half + 0.01, 0.39, half - 0.06),
+                palette::BASE_LIGHT,
+            );
+            mesh.cuboid(
+                Vec3::new(-half + 0.06, 0.34, half - 0.01),
+                Vec3::new(half - 0.06, 0.39, half + 0.01),
+                palette::BASE_LIGHT,
+            );
+            mesh.cuboid(
+                Vec3::new(-half, ARTILLERY_PIVOT - 0.04, -half),
+                Vec3::new(half, ARTILLERY_PIVOT, half),
+                palette::HAZARD,
+            );
+            // An antenna in the back corner, with a light on top.
+            let mast = Vec2::new(0.27, 0.27);
+            mesh.cuboid(
+                Vec3::new(mast.x - 0.025, ARTILLERY_PIVOT, mast.y - 0.025),
+                Vec3::new(mast.x + 0.025, ARTILLERY_ANTENNA_TOP - 0.07, mast.y + 0.025),
+                steel,
+            );
+            mesh.cuboid(
+                Vec3::new(mast.x - 0.05, ARTILLERY_ANTENNA_TOP - 0.07, mast.y - 0.05),
+                Vec3::new(mast.x + 0.05, ARTILLERY_ANTENNA_TOP, mast.y + 0.05),
+                palette::BASE_LIGHT,
+            );
+        }
     }
     mesh.build()
 }
@@ -206,6 +261,31 @@ pub fn turret_mesh(kind: Kind) -> Mesh {
                 };
                 let half = Vec3::new(0.09, 0.06, 0.06);
                 part((at - half).to_array(), (at + half).to_array(), color);
+            }
+        }
+        Kind::ArtilleryCommand => {
+            // A turntable and a cradle holding a rack of four launch tubes.
+            part([-0.24, 0.0, -0.24], [0.24, 0.06, 0.24], steel);
+            part([-0.16, 0.06, -0.02], [0.16, 0.2, 0.24], shade(gun, 1.2));
+            let (start, direction, length) = ROCKET_RACK;
+            // Across the rack: sideways, and square to the tubes in the upright plane.
+            let across = Vec3::new(0.0, -direction.z, direction.y);
+            let steps = 12;
+            for (side, row) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let offset = Vec3::X * side * 0.075 + across * row * 0.07;
+                for i in 0..=steps {
+                    let t = i as f32 / steps as f32;
+                    let at = start + offset + direction * length * t;
+                    let color = if (0.7..0.8).contains(&t) {
+                        palette::HAZARD
+                    } else if i == steps {
+                        shade(gun, 0.4)
+                    } else {
+                        shade(gun, 0.9 + 0.2 * t)
+                    };
+                    let half = Vec3::splat(0.05);
+                    part((at - half).to_array(), (at + half).to_array(), color);
+                }
             }
         }
     }

@@ -28,7 +28,7 @@ impl Plugin for RangePlugin {
 /// second.
 pub fn reach(kind: Kind) -> Option<(f32, f32)> {
     match kind {
-        Kind::Wall => None,
+        Kind::Wall | Kind::ArtilleryCommand => None,
         Kind::Autocannon => Some((0.0, AUTOCANNON_RANGE)),
         Kind::Flamer => Some((0.0, FLAMER_RANGE)),
         Kind::Mortar => Some((MORTAR_MIN_RANGE, MORTAR_RANGE)),

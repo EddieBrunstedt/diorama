@@ -22,6 +22,9 @@ use bevy::prelude::*;
 
 /// How tall it stands (to the top of its antenna).
 pub const HEIGHT: f32 = 1.5;
+/// The light on top of its antenna, from its middle on the ground: where the sniper shot comes
+/// from (see [`crate::abilities`]).
+pub const ANTENNA: Vec3 = Vec3::new(0.22, HEIGHT - 0.04, -0.18);
 /// How bright the hit flash glows at its peak.
 const FLASH_BRIGHTNESS: f32 = 2.5;
 /// A ruin is wider and much lower than the building, and charred.
@@ -89,8 +92,9 @@ pub struct CommandCenterRepaired {
     pub to: u32,
 }
 
+/// The Command Center as the player sees it.
 #[derive(Component)]
-struct CommandCenterView {
+pub struct CommandCenterView {
     /// Its own material, so it can flash without lighting up everything else.
     material: Handle<StandardMaterial>,
     /// Seconds of flash left, and how strong it started.
@@ -179,7 +183,7 @@ fn command_center_mesh(size: f32) -> Mesh {
         shade(palette::STEEL, 1.25),
     );
     // Antenna and its light.
-    let mast = Vec2::new(0.22, -0.18);
+    let mast = ANTENNA.xz();
     mesh.cuboid(
         Vec3::new(mast.x - 0.03, 1.2, mast.y - 0.03),
         Vec3::new(mast.x + 0.03, HEIGHT - 0.08, mast.y + 0.03),

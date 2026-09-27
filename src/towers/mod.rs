@@ -107,7 +107,8 @@ pub struct Turret {
     pub kick: f32,
 }
 
-/// A tower fired: from the muzzle at `from`, at `to`.
+/// A tower fired (or an Artillery Command launched a barrage's shell): from the muzzle at
+/// `from`, at `to`.
 #[derive(Message, Clone, Copy, Debug)]
 pub struct TowerFired {
     pub tower: Entity,
@@ -116,25 +117,55 @@ pub struct TowerFired {
     pub to: Vec3,
 }
 
-/// A mortar shell hit the ground at `at`.
+/// A shell hit the ground at `at`, blasting everything within `radius`.
 #[derive(Message, Clone, Copy, Debug)]
 pub struct ShellLanded {
     pub at: Vec3,
+    pub radius: f32,
 }
 
-/// A mortar shell in flight.
+/// What a shell does where it lands: `damage` at the middle, falling off to `edge` (a fraction)
+/// at `radius`.
+#[derive(Clone, Copy, Debug)]
+pub struct Blast {
+    pub damage: f32,
+    pub radius: f32,
+    pub edge: f32,
+}
+
+/// A shell in flight, from a mortar or a barrage (see [`crate::abilities`]): it flies from
+/// `from` to `to` in `flight` seconds, `arc` above the straight line at its highest.
 #[derive(Component, Clone, Debug)]
 pub struct Shell {
     from: Vec3,
     to: Vec3,
     age: f32,
+    flight: f32,
+    arc: f32,
+    blast: Blast,
 }
 
 impl Shell {
+    pub fn new(from: Vec3, to: Vec3, flight: f32, arc: f32, blast: Blast) -> Self {
+        Self {
+            from,
+            to,
+            age: 0.0,
+            flight,
+            arc,
+            blast,
+        }
+    }
+
     /// Where it is `age` seconds into its flight: along the line, plus an arc.
     fn position(&self, age: f32) -> Vec3 {
-        let t = (age / MORTAR_FLIGHT_SECONDS).clamp(0.0, 1.0);
-        self.from.lerp(self.to, t) + Vec3::Y * SHELL_ARC * 4.0 * t * (1.0 - t)
+        let t = (age / self.flight).clamp(0.0, 1.0);
+        self.from.lerp(self.to, t) + Vec3::Y * self.arc * 4.0 * t * (1.0 - t)
+    }
+
+    /// Whether it has landed.
+    fn landed(&self) -> bool {
+        self.age >= self.flight
     }
 }
 
@@ -151,6 +182,10 @@ impl TowerAssets {
             .get(&kind)
             .map(|(base, _)| base.clone())
             .unwrap_or_default()
+    }
+
+    pub fn shell(&self) -> Handle<Mesh> {
+        self.shell.clone()
     }
 
     fn turret(&self, kind: Kind) -> Handle<Mesh> {
@@ -186,7 +221,7 @@ fn turret_rotation(aim: Vec2) -> Quat {
 }
 
 /// How big an enemy of `class` is, for cones and blasts that catch its edge.
-fn radius(class: Class) -> f32 {
+pub fn radius(class: Class) -> f32 {
     match class {
         Class::Swarmer => SWARMER_RADIUS,
         Class::Brute => BRUTE_RADIUS,
@@ -233,8 +268,8 @@ fn turn_turrets(
 /// How fast a turret's kick recovers (cells per second).
 const KICK_RECOVERY: f32 = 0.8;
 
-/// An enemy a tower could hit, looked up by what the horde's index says is near.
-type Enemies<'w, 's> = Query<
+/// An enemy a tower (or an ability) could hit, looked up by what the horde's index says is near.
+pub type Enemies<'w, 's> = Query<
     'w,
     's,
     (
@@ -286,14 +321,19 @@ fn candidates(
 }
 
 /// Hits `entity` for `amount`. Brutes flinch.
-fn hit(enemies: &mut Enemies, entity: Entity, amount: f32, flinch: bool) {
+pub fn hit(enemies: &mut Enemies, entity: Entity, amount: f32, flinch: bool) {
+    hit_with(enemies, entity, amount, flinch.then_some(BRUTE_HIT_SQUASH));
+}
+
+/// Hits `entity` for `amount`. Brutes squash by `flinch`, if given.
+pub fn hit_with(enemies: &mut Enemies, entity: Entity, amount: f32, flinch: Option<f32>) {
     if let Ok((mut health, _, _, brute, squash)) = enemies.get_mut(entity) {
         health.hurt(amount);
-        if flinch
+        if let Some(amount) = flinch
             && brute.is_some()
             && let Some(mut squash) = squash
         {
-            squash.pulse(BRUTE_HIT_SQUASH);
+            squash.pulse(amount);
         }
     }
 }
@@ -487,11 +527,12 @@ fn fire_mortars(
         tower.target = None;
         let muzzle = tower.muzzle(transform.translation);
         let to = Vec3::new(landing.x, 0.0, landing.y);
-        let shell = Shell {
-            from: muzzle,
-            to,
-            age: 0.0,
+        let blast = Blast {
+            damage: MORTAR_DAMAGE,
+            radius: MORTAR_SPLASH_RADIUS,
+            edge: MORTAR_EDGE_DAMAGE,
         };
+        let shell = Shell::new(muzzle, to, MORTAR_FLIGHT_SECONDS, SHELL_ARC, blast);
         commands.spawn((
             Mesh3d(assets.shell.clone()),
             MeshMaterial3d(material.0.clone()),
@@ -524,22 +565,23 @@ fn fly_shells(
         if let Some(heading) = (ahead - at).try_normalize() {
             transform.look_to(heading, Vec3::Y);
         }
-        if shell.age < MORTAR_FLIGHT_SECONDS {
+        if !shell.landed() {
             continue;
         }
         commands.entity(entity).despawn();
         let middle = shell.to.xz();
+        let blast = shell.blast;
         let caught: Vec<(Entity, f32)> = index
-            .near(middle, MORTAR_SPLASH_RADIUS)
+            .near(middle, blast.radius)
             .filter_map(|(_, enemy, class)| {
                 let (_, transform, ..) = enemies.get(enemy).ok()?;
                 let distance = transform.translation.xz().distance(middle);
                 let damage = splash(
                     distance,
                     radius(class),
-                    MORTAR_SPLASH_RADIUS,
-                    MORTAR_DAMAGE,
-                    MORTAR_EDGE_DAMAGE,
+                    blast.radius,
+                    blast.damage,
+                    blast.edge,
                 )?;
                 Some((enemy, damage))
             })
@@ -547,7 +589,10 @@ fn fly_shells(
         for (enemy, damage) in caught {
             hit(&mut enemies, enemy, damage, true);
         }
-        landed.write(ShellLanded { at: shell.to });
+        landed.write(ShellLanded {
+            at: shell.to,
+            radius: blast.radius,
+        });
     }
 }
 
@@ -557,14 +602,16 @@ mod tests {
 
     #[test]
     fn shells_arc_from_muzzle_to_target() {
-        let shell = Shell {
-            from: Vec3::new(0.0, 1.0, 0.0),
-            to: Vec3::new(8.0, 0.0, 0.0),
-            age: 0.0,
+        let blast = Blast {
+            damage: 1.0,
+            radius: 1.0,
+            edge: 1.0,
         };
+        let from = Vec3::new(0.0, 1.0, 0.0);
+        let shell = Shell::new(from, Vec3::new(8.0, 0.0, 0.0), 2.0, SHELL_ARC, blast);
         assert_eq!(shell.position(0.0), shell.from);
-        assert_eq!(shell.position(MORTAR_FLIGHT_SECONDS), shell.to);
-        let top = shell.position(MORTAR_FLIGHT_SECONDS / 2.0);
+        assert_eq!(shell.position(2.0), shell.to);
+        let top = shell.position(1.0);
         assert!((top.y - (0.5 + SHELL_ARC)).abs() < 1e-4, "{top}");
     }
 

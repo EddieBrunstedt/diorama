@@ -6,7 +6,9 @@
 //!   seconds; a comma-separated list takes several (`shot-1.png`, `shot-2.png`, ...).
 //! - `DIORAMA_SCRIPT="1 move 800 450; 1.1 down; 1.5 move 900 450; 1.6 up"` fakes input at the
 //!   given times (seconds):
-//!   - `move X Y` moves the cursor (logical pixels);
+//!   - `move X Y` moves the cursor (logical pixels). It moves the window's own cursor too, so
+//!     UI buttons can be clicked (on Wayland, winit logs that it can't move the real pointer:
+//!     harmless);
 //!   - `cell X Y` moves the cursor over the middle of grid cell (X, Y) on the ground, wherever
 //!     the window's size puts it;
 //!   - `down` / `up` presses or releases a mouse button: `left` (the default), `right` or
@@ -303,7 +305,7 @@ fn run_input_script(
     mut commands: Commands,
     time: Res<Time>,
     mut script: ResMut<InputScript>,
-    window: Single<Entity, With<PrimaryWindow>>,
+    mut primary: Single<(Entity, &mut Window), With<PrimaryWindow>>,
     camera: Single<&Camera, With<MainCamera>>,
     rig: Res<CameraRig>,
     mut window_events: MessageWriter<WindowEvent>,
@@ -311,7 +313,7 @@ fn run_input_script(
     mut keyboard: MessageWriter<KeyboardInput>,
     mut wheel: MessageWriter<MouseWheel>,
 ) {
-    let window = *window;
+    let (window, ref mut window_state) = *primary;
     while let Some(&(at, step)) = script.steps.get(script.next)
         && time.elapsed_secs() >= at
     {
@@ -334,6 +336,8 @@ fn run_input_script(
             Step::Cell(_) => unreachable!("turned into a move above"),
             Step::Move(position) => {
                 commands.insert_resource(ScriptedCursor(position));
+                // The UI's buttons follow the window's own cursor, not cursor events.
+                window_state.set_cursor_position(Some(position));
                 window_events.write(WindowEvent::CursorMoved(CursorMoved {
                     window,
                     position,

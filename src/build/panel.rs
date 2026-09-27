@@ -11,7 +11,7 @@ use bevy::prelude::*;
 
 const FONT_SIZE: f32 = 14.0;
 const PRICE_FONT_SIZE: f32 = 13.0;
-const BUTTON_WIDTH: f32 = 132.0;
+const BUTTON_WIDTH: f32 = 116.0;
 
 pub struct PanelPlugin;
 
@@ -72,7 +72,7 @@ fn spawn_panel(mut commands: Commands) {
                         PanelButton(kind),
                         Button,
                         Node {
-                            width: Val::Px(BUTTON_WIDTH),
+                            min_width: Val::Px(BUTTON_WIDTH),
                             padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
                             border: UiRect::all(Val::Px(2.0)),
                             border_radius: BorderRadius::all(Val::Px(4.0)),

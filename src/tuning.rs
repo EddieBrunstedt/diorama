@@ -21,6 +21,7 @@ pub mod structures {
     pub const AUTOCANNON_HP: u32 = 150;
     pub const FLAMER_HP: u32 = 200;
     pub const MORTAR_HP: u32 = 120;
+    pub const ARTILLERY_COMMAND_HP: u32 = 200;
 }
 
 /// Towers: how far they reach, how fast they fire and how hard they hit. Ranges are in cells
@@ -65,6 +66,38 @@ pub mod towers {
     pub const MORTAR_BRUTE_WEIGHT: f32 = 6.0;
 }
 
+/// Abilities: fired in the wave phase from the buildings that give them. Cooldowns are in game
+/// seconds, so they come back faster at 2× and 3×.
+pub mod abilities {
+    /// Sniper shot (the Command Center): one big hit on one enemy, anywhere on the map. It snaps
+    /// to the toughest enemy whose edge is within this far of the cursor.
+    pub const SNIPER_DAMAGE: f32 = 400.0;
+    pub const SNIPER_COOLDOWN: f32 = 15.0;
+    pub const SNIPER_SNAP: f32 = 1.5;
+
+    /// Mortar barrage (the Artillery Command): this many shells spread over a circle this wide
+    /// (radius, in cells) around where you click, anywhere on the map. The first lands this long
+    /// after the click, and the rest follow over the next `BARRAGE_SPREAD_SECONDS`.
+    pub const BARRAGE_SHELLS: usize = 12;
+    pub const BARRAGE_RADIUS: f32 = 3.0;
+    pub const BARRAGE_FIRST_LANDS: f32 = 1.5;
+    pub const BARRAGE_SPREAD_SECONDS: f32 = 1.0;
+    /// How far a shell's landing spot strays from its even spread (cells), so the pattern
+    /// doesn't look drawn.
+    pub const BARRAGE_JITTER: f32 = 0.3;
+    /// Each shell's blast: full damage at its middle, down to `BARRAGE_EDGE_DAMAGE` (a fraction)
+    /// at its edge.
+    pub const BARRAGE_DAMAGE: f32 = 50.0;
+    pub const BARRAGE_BLAST_RADIUS: f32 = 1.25;
+    pub const BARRAGE_EDGE_DAMAGE: f32 = 0.5;
+    /// Each standing Artillery Command gives one charge, and each charge reloads on its own.
+    pub const BARRAGE_COOLDOWN: f32 = 30.0;
+    /// A barrage shell flies this long from its Artillery Command (seconds), this high above the
+    /// straight line.
+    pub const BARRAGE_FLIGHT_SECONDS: f32 = 1.2;
+    pub const BARRAGE_ARC: f32 = 7.0;
+}
+
 /// Money: what things cost, what kills pay, and what selling and repairs are worth.
 pub mod economy {
     pub const STARTING_MONEY: u32 = 150;
@@ -72,6 +105,7 @@ pub mod economy {
     pub const AUTOCANNON_PRICE: u32 = 40;
     pub const FLAMER_PRICE: u32 = 50;
     pub const MORTAR_PRICE: u32 = 70;
+    pub const ARTILLERY_COMMAND_PRICE: u32 = 100;
     /// A wave's swarmers share a purse: killing all of them pays this much, plus this much more
     /// for every wave after the first, however many there are. So money doesn't grow with the
     /// size of the horde, and every leak loses its share.
@@ -385,6 +419,26 @@ pub mod juice {
     pub const MONEY_PULSE: f32 = 0.12;
     pub const REWARD_POP_SECONDS: f32 = 0.9;
     pub const BROKE_SECONDS: f32 = 0.35;
+
+    /// The sniper shot: a flash on the Command Center's roof, a tracer lasting this long (seconds)
+    /// and this wide, a big flinch on a brute it hits, a moment of hit-stop and a shake.
+    pub const SNIPER_TRACER_SECONDS: f32 = 0.14;
+    pub const SNIPER_TRACER_WIDTH: f32 = 0.13;
+    pub const SNIPER_FLINCH: f32 = -0.3;
+    pub const SNIPER_HIT_STOP: f32 = 0.08;
+    pub const SNIPER_SHAKE: f32 = 0.3;
+    /// The barrage: each shell landing shakes the camera (capped higher than a mortar's), and a
+    /// marker blinks where a shell will land for this long before it does (seconds).
+    pub const BARRAGE_SHAKE: f32 = 0.2;
+    pub const BARRAGE_SHAKE_MAX: f32 = 0.6;
+    pub const BARRAGE_MARKER_SECONDS: f32 = 0.6;
+    /// The Artillery Command's rack swings toward a barrage's target this fast (radians per
+    /// second).
+    pub const BARRAGE_TURN_RATE: f32 = 8.0;
+    /// The ability bar: a slot pops (a scale) when a charge comes back, and flashes red for this
+    /// long (seconds) when it can't be used.
+    pub const ABILITY_READY_POP: f32 = 0.18;
+    pub const ABILITY_DENIED_SECONDS: f32 = 0.35;
 
     /// Fire, sparks, flashes and tracers glow this many times brighter than their color.
     pub const GLOW_BRIGHTNESS: f32 = 2.5;

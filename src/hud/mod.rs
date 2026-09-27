@@ -199,12 +199,17 @@ fn spawn_hint(mut commands: Commands) {
         .with_children(|hint| {
             let build = HintLine::In(Phase::Build);
             for (line, text) in [
-                (build, "1-4: pick what to build"),
+                (build, "1-5: pick what to build"),
                 (build, "Left click: build, or repair (drag for a line)"),
                 (build, "Right click: sell (drag for a line)"),
                 (build, "Space: start the wave"),
                 (HintLine::Undo, "Ctrl+Z: undo"),
                 (HintLine::Redo, "Ctrl+Shift+Z: redo"),
+                (
+                    HintLine::In(Phase::Wave),
+                    "1-2: aim an ability, left click: fire",
+                ),
+                (HintLine::In(Phase::Wave), "Esc / right click: stop aiming"),
                 (HintLine::In(Phase::Wave), "Tab: game speed"),
                 (HintLine::In(Phase::GameOver), "R: restart"),
                 (HintLine::Always, "WASD / middle drag: pan    Scroll: zoom"),

@@ -127,3 +127,23 @@ pub const START_BUTTON_HOVER: Color = Color::srgba(0.16, 0.42, 0.48, 0.95);
 pub const BANNER_TEXT: Color = Color::srgb(0.9, 0.95, 1.0);
 pub const GAME_OVER_TITLE: Color = Color::srgb(1.0, 0.35, 0.2);
 pub const GAME_OVER_BACKDROP: Color = Color::srgba(0.02, 0.02, 0.03, 0.6);
+
+/// Abilities. The sniper shot's tracer is the Command Center's light, white-hot; its reticle and
+/// laser sight are cyan on a target and red with nothing to hit. The barrage's circle is amber
+/// while aiming, and red where it's coming down.
+pub const SNIPER_TRACER: Color = Color::srgb(0.8, 0.98, 1.0);
+pub const AIM: Color = Color::srgb(0.45, 0.95, 1.0);
+pub const AIM_NONE: Color = Color::srgb(1.0, 0.25, 0.2);
+pub const LASER: Color = Color::srgba(0.45, 0.95, 1.0, 0.6);
+pub const BARRAGE_AIM: Color = Color::srgb(1.0, 0.62, 0.2);
+pub const BARRAGE_ZONE: Color = Color::srgb(1.0, 0.25, 0.15);
+/// How see-through the fill inside an aiming circle or a barrage zone is.
+pub const AIM_FILL_ALPHA: f32 = 0.14;
+/// The ability bar: a ready slot's border, a charge pip (ready and reloading), and the reload
+/// bar's track and fill (reloading, and full).
+pub const ABILITY_READY: Color = Color::srgb(0.9, 0.95, 1.0);
+pub const ABILITY_PIP: Color = Color::srgb(0.45, 0.95, 1.0);
+pub const ABILITY_PIP_EMPTY: Color = Color::srgba(1.0, 1.0, 1.0, 0.15);
+pub const ABILITY_TRACK: Color = Color::srgba(1.0, 1.0, 1.0, 0.1);
+pub const ABILITY_RELOAD: Color = Color::srgba(0.45, 0.95, 1.0, 0.45);
+pub const ABILITY_FULL: Color = Color::srgb(0.45, 0.95, 1.0);

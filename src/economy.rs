@@ -152,6 +152,7 @@ pub fn price(kind: Kind) -> u32 {
         Kind::Autocannon => AUTOCANNON_PRICE,
         Kind::Flamer => FLAMER_PRICE,
         Kind::Mortar => MORTAR_PRICE,
+        Kind::ArtilleryCommand => ARTILLERY_COMMAND_PRICE,
     }
 }
 

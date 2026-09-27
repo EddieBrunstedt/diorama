@@ -4,13 +4,11 @@
 
 use super::{Shell, ShellLanded, Tower, TowerFired, TowerSystems, Turret};
 use crate::grid::{Grid, Kind};
-use crate::juice::{Burst, Particles, Shake, Spray, Squash};
+use crate::juice::{Burst, Fleeting, Look, Particles, Shake, Spray, Squash};
 use crate::palette;
 use crate::shapes::ring_mesh;
 use crate::tuning::juice::*;
-use crate::tuning::towers::{
-    FLAMER_CONE_DEGREES, FLAMER_RANGE, MORTAR_FLIGHT_SECONDS, MORTAR_SPLASH_RADIUS,
-};
+use crate::tuning::towers::{FLAMER_CONE_DEGREES, FLAMER_RANGE};
 use bevy::{light::NotShadowCaster, platform::collections::HashMap, prelude::*};
 
 pub struct EffectsPlugin;
@@ -25,7 +23,6 @@ impl Plugin for EffectsPlugin {
                 trail_shells,
                 show_blasts,
                 smoke_damaged_towers,
-                run_fleeting,
             )
                 .after(TowerSystems),
         );
@@ -64,71 +61,6 @@ impl FromWorld for EffectAssets {
     }
 }
 
-/// Something that's only there for a moment, changing as it goes, then despawns.
-#[derive(Component, Clone, Debug)]
-struct Fleeting {
-    age: f32,
-    lifetime: f32,
-    look: Look,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Look {
-    /// Shrinks away from its starting scale.
-    Shrink(Vec3),
-    /// Thins out along its x and y (a tracer keeps its length).
-    Thin(Vec3),
-    /// Grows from nothing to `radius`, flattening as it goes.
-    Ring { radius: f32 },
-    /// A light fading out from `intensity`.
-    Light { intensity: f32 },
-}
-
-impl Fleeting {
-    fn new(lifetime: f32, look: Look) -> Self {
-        Self {
-            age: 0.0,
-            lifetime,
-            look,
-        }
-    }
-}
-
-fn run_fleeting(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut fleeting: Query<(
-        Entity,
-        &mut Fleeting,
-        &mut Transform,
-        Option<&mut PointLight>,
-    )>,
-) {
-    for (entity, mut fleeting, mut transform, light) in &mut fleeting {
-        fleeting.age += time.delta_secs();
-        let t = fleeting.age / fleeting.lifetime;
-        if t >= 1.0 {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        match fleeting.look {
-            Look::Shrink(scale) => transform.scale = scale * (1.0 - t),
-            Look::Thin(scale) => {
-                transform.scale = Vec3::new(scale.x * (1.0 - t), scale.y * (1.0 - t), scale.z)
-            }
-            Look::Ring { radius } => {
-                let grow = EaseFunction::QuadraticOut.sample_clamped(t);
-                transform.scale = Vec3::new(radius * grow, 1.0, radius * grow) * (1.0 - t * 0.3);
-            }
-            Look::Light { intensity } => {
-                if let Some(mut light) = light {
-                    light.intensity = intensity * (1.0 - t) * (1.0 - t);
-                }
-            }
-        }
-    }
-}
-
 fn show_shots(
     mut commands: Commands,
     mut fired: MessageReader<TowerFired>,
@@ -148,7 +80,7 @@ fn show_shots(
                     turret.kick = kick;
                 }
             }
-            if shot.kind == Kind::Mortar {
+            if matches!(shot.kind, Kind::Mortar | Kind::ArtilleryCommand) {
                 squash.pulse(MORTAR_THUMP);
             }
         }
@@ -196,7 +128,7 @@ fn show_shots(
                     },
                 );
             }
-            Kind::Mortar => {
+            Kind::Mortar | Kind::ArtilleryCommand => {
                 particles.spray(
                     &mut commands,
                     shot.from,
@@ -288,7 +220,7 @@ fn trail_shells(
     const TRAIL_RATE: f32 = 50.0;
     let dt = time.delta_secs();
     for (shell, transform) in &shells {
-        if shell.age >= MORTAR_FLIGHT_SECONDS {
+        if shell.landed() {
             continue;
         }
         let count = ((shell.age * TRAIL_RATE).floor() - ((shell.age - dt) * TRAIL_RATE).floor())
@@ -334,7 +266,7 @@ fn show_blasts(
             PointLight {
                 color: palette::BLAST_LIGHT,
                 intensity: BLAST_LIGHT,
-                range: MORTAR_SPLASH_RADIUS * 5.0,
+                range: blast.radius * 5.0,
                 shadow_maps_enabled: false,
                 ..default()
             },
@@ -344,7 +276,7 @@ fn show_blasts(
             Fleeting::new(
                 BLAST_RING_SECONDS,
                 Look::Ring {
-                    radius: MORTAR_SPLASH_RADIUS,
+                    radius: blast.radius,
                 },
             ),
             Mesh3d(assets.ring.clone()),

@@ -1,8 +1,8 @@
 //! Building with the mouse, in the build phase. Every click changes the grid right away, and
 //! pays for it.
 //!
-//! - 1–4 (or the build panel, [`panel`]) pick what a left click builds: a wall or one of the
-//!   towers.
+//! - 1–5 (or the build panel, [`panel`]) pick what a left click builds: a wall, one of the
+//!   towers, or the Artillery Command.
 //! - Left click builds it. Drag to draw a straight line (it follows the axis you dragged further
 //!   along); structures appear and disappear live as the line changes, until the money runs out.
 //! - Left click on a damaged wall or tower, or on the Command Center, repairs it, as far as the
@@ -77,11 +77,12 @@ pub struct ActiveStroke(pub Option<(Stroke, MouseButton)>);
 pub struct Tool(pub Kind);
 
 /// The key that picks each kind, in [`Kind::ALL`] order.
-pub const TOOL_KEYS: [(KeyCode, &str); 4] = [
+pub const TOOL_KEYS: [(KeyCode, &str); 5] = [
     (KeyCode::Digit1, "1"),
     (KeyCode::Digit2, "2"),
     (KeyCode::Digit3, "3"),
     (KeyCode::Digit4, "4"),
+    (KeyCode::Digit5, "5"),
 ];
 
 fn pick_tool(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<Tool>) {

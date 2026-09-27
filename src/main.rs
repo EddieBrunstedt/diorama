@@ -6,6 +6,7 @@
 // Bevy systems naturally take many parameters and spell out their queries.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+mod abilities;
 mod build;
 mod camera;
 mod command_center;
@@ -61,6 +62,7 @@ fn main() {
             horde::HordePlugin,
             command_center::CommandCenterPlugin,
             preview::PreviewPlugin,
+            abilities::AbilitiesPlugin,
             hud::HudPlugin,
             juice::JuicePlugin,
             dev::DevPlugin,

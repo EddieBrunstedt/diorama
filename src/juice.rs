@@ -1,5 +1,5 @@
 //! Small in-house animation helpers: tweens with easing, squash & stretch springs, wobbles,
-//! particles, screen shake, and hit-stop and slow motion (with the game speed, in
+//! particles, things that are only there for a moment ([`Fleeting`]), screen shake, and hit-stop and slow motion (with the game speed, in
 //! [`TimeScale`]).
 
 use crate::rng::{Rng, RunSeed};
@@ -23,6 +23,7 @@ impl Plugin for JuicePlugin {
                     run_squash,
                     run_wobbles,
                     run_particles,
+                    run_fleeting,
                     decay_shake,
                 ),
             )
@@ -419,6 +420,71 @@ fn run_particles(
         let shrink = ((1.0 - life) / 0.4).min(1.0);
         let grow = 1.0 + (particle.grow - 1.0) * life;
         transform.scale = Vec3::splat(particle.size * grow * shrink);
+    }
+}
+
+/// Something that's only there for a moment, changing as it goes, then despawns.
+#[derive(Component, Clone, Debug)]
+pub struct Fleeting {
+    age: f32,
+    lifetime: f32,
+    look: Look,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Look {
+    /// Shrinks away from its starting scale.
+    Shrink(Vec3),
+    /// Thins out along its x and y (a tracer keeps its length).
+    Thin(Vec3),
+    /// Grows from nothing to `radius`, flattening as it goes.
+    Ring { radius: f32 },
+    /// A light fading out from `intensity`.
+    Light { intensity: f32 },
+}
+
+impl Fleeting {
+    pub fn new(lifetime: f32, look: Look) -> Self {
+        Self {
+            age: 0.0,
+            lifetime,
+            look,
+        }
+    }
+}
+
+fn run_fleeting(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut fleeting: Query<(
+        Entity,
+        &mut Fleeting,
+        &mut Transform,
+        Option<&mut PointLight>,
+    )>,
+) {
+    for (entity, mut fleeting, mut transform, light) in &mut fleeting {
+        fleeting.age += time.delta_secs();
+        let t = fleeting.age / fleeting.lifetime;
+        if t >= 1.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        match fleeting.look {
+            Look::Shrink(scale) => transform.scale = scale * (1.0 - t),
+            Look::Thin(scale) => {
+                transform.scale = Vec3::new(scale.x * (1.0 - t), scale.y * (1.0 - t), scale.z)
+            }
+            Look::Ring { radius } => {
+                let grow = EaseFunction::QuadraticOut.sample_clamped(t);
+                transform.scale = Vec3::new(radius * grow, 1.0, radius * grow) * (1.0 - t * 0.3);
+            }
+            Look::Light { intensity } => {
+                if let Some(mut light) = light {
+                    light.intensity = intensity * (1.0 - t) * (1.0 - t);
+                }
+            }
+        }
     }
 }
 

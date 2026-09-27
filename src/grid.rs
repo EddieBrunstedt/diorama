@@ -6,7 +6,9 @@
 
 use crate::tuning::command_center::MAX_HP as COMMAND_CENTER_HP;
 use crate::tuning::grid::CHUNK_SIZE;
-use crate::tuning::structures::{AUTOCANNON_HP, FLAMER_HP, MORTAR_HP, WALL_HP};
+use crate::tuning::structures::{
+    ARTILLERY_COMMAND_HP, AUTOCANNON_HP, FLAMER_HP, MORTAR_HP, WALL_HP,
+};
 use bevy::{platform::collections::HashMap, prelude::*};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -48,11 +50,20 @@ pub enum Kind {
     Flamer,
     /// Long range, slow, splash.
     Mortar,
+    /// Doesn't shoot by itself: it gives the mortar barrage ability, one charge per copy (see
+    /// [`crate::abilities`]).
+    ArtilleryCommand,
 }
 
 impl Kind {
     /// Everything that can be built, in the order the build panel shows them.
-    pub const ALL: [Kind; 4] = [Kind::Wall, Kind::Autocannon, Kind::Flamer, Kind::Mortar];
+    pub const ALL: [Kind; 5] = [
+        Kind::Wall,
+        Kind::Autocannon,
+        Kind::Flamer,
+        Kind::Mortar,
+        Kind::ArtilleryCommand,
+    ];
 
     /// The most HP it can have, which it's built with.
     pub const fn max_hp(self) -> u32 {
@@ -61,9 +72,12 @@ impl Kind {
             Kind::Autocannon => AUTOCANNON_HP,
             Kind::Flamer => FLAMER_HP,
             Kind::Mortar => MORTAR_HP,
+            Kind::ArtilleryCommand => ARTILLERY_COMMAND_HP,
         }
     }
 
+    /// Everything but walls: the towers, and the Artillery Command, which is built and drawn
+    /// like one (a base and a turret that turns), though it doesn't shoot by itself.
     pub fn is_tower(self) -> bool {
         self != Kind::Wall
     }
@@ -74,6 +88,7 @@ impl Kind {
             Kind::Autocannon => "Autocannon",
             Kind::Flamer => "Flamer",
             Kind::Mortar => "Mortar",
+            Kind::ArtilleryCommand => "Artillery Command",
         }
     }
 }
@@ -448,6 +463,15 @@ impl Grid {
             .collect()
     }
 
+    /// How many `kind`s stand on the map.
+    pub fn count(&self, kind: Kind) -> usize {
+        self.chunks
+            .values()
+            .flat_map(|chunk| &chunk.cells)
+            .filter(|cell| cell.structure.and_then(Structure::kind) == Some(kind))
+            .count()
+    }
+
     /// The smallest rectangle of cells covering the whole map (`max` inclusive).
     pub fn bounds(&self) -> Option<IRect> {
         self.chunks.keys().fold(None, |bounds, &chunk| {
@@ -509,6 +533,21 @@ mod tests {
         assert!(hp.damage(2), "the hit that takes the last HP");
         assert!(hp.fallen());
         assert!(!hp.damage(1), "already down");
+    }
+
+    #[test]
+    fn counting_what_stands() {
+        let mut grid = two_by_two();
+        assert_eq!(grid.count(Kind::ArtilleryCommand), 0);
+        let cells = [IVec2::new(-12, 5), IVec2::new(9, -3)];
+        for cell in cells {
+            grid.set_structure(cell, Some(Structure::new(Kind::ArtilleryCommand)));
+        }
+        grid.set_structure(IVec2::new(0, 4), Some(Structure::WALL));
+        assert_eq!(grid.count(Kind::ArtilleryCommand), 2);
+        assert_eq!(grid.count(Kind::Wall), 1);
+        grid.damage(cells[0], 10_000);
+        assert_eq!(grid.count(Kind::ArtilleryCommand), 1, "broken");
     }
 
     #[test]
