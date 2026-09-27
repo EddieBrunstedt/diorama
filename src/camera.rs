@@ -1,5 +1,6 @@
 //! The overview camera: steep perspective, looking straight up the map so grid rows stay level
-//! on screen. It frames the whole map at the start.
+//! on screen. It frames the whole map at the start, and keeps it framed as the window changes
+//! size (e.g. when a tiling window manager resizes it) until the player moves the camera.
 //!
 //! Pan with WASD or the arrow keys, or drag with the middle mouse button (the ground under the
 //! cursor sticks to it). Scroll to zoom toward the cursor.
@@ -50,6 +51,9 @@ pub struct CameraRig {
     grab: Option<Vec3>,
     /// The map plus some room around it: the focus stays inside (world x and z).
     limits: Rect,
+    /// The map area to keep framed, and the window aspect it was last framed for. Cleared once
+    /// the player pans or zooms.
+    framing: Option<(Rect, f32)>,
 }
 
 impl Default for CameraRig {
@@ -60,6 +64,7 @@ impl Default for CameraRig {
             target_distance: MAX_DISTANCE,
             grab: None,
             limits: Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(f32::MAX)),
+            framing: None,
         }
     }
 }
@@ -124,6 +129,26 @@ fn framing_distance(map: Rect, aspect: f32) -> f32 {
     high
 }
 
+/// The window's width over its height.
+fn aspect(window: &Window) -> f32 {
+    window.width() / window.height().max(1.0)
+}
+
+/// Frames `map` for the window's current shape, if that changed since it was last framed.
+fn keep_framed(rig: &mut CameraRig, window: &Window) {
+    let Some((map, framed_for)) = rig.framing else {
+        return;
+    };
+    let aspect = aspect(window);
+    if aspect == framed_for {
+        return;
+    }
+    rig.framing = Some((map, aspect));
+    rig.focus = map.center();
+    rig.distance = framing_distance(map, aspect);
+    rig.target_distance = rig.distance;
+}
+
 fn spawn_camera(
     mut commands: Commands,
     grid: Res<Grid>,
@@ -135,10 +160,8 @@ fn spawn_camera(
         let max = (bounds.max + IVec2::ONE).as_vec2();
         let map = Rect::from_corners(min, max);
         rig.limits = map.inflate(PAN_OVERSCROLL);
-        rig.focus = map.center();
-        let aspect = window.width() / window.height().max(1.0);
-        rig.distance = framing_distance(map, aspect);
-        rig.target_distance = rig.distance;
+        rig.framing = Some((map, f32::NAN));
+        keep_framed(&mut rig, &window);
     }
     commands.spawn((
         MainCamera,
@@ -182,6 +205,9 @@ fn control_camera(
     }
     let speed = PAN_SPEED * rig.distance;
     rig.focus += pan.normalize_or_zero() * speed * dt;
+    if pan != Vec2::ZERO {
+        rig.framing = None;
+    }
 
     // Zoom, keeping the ground under the cursor where it is.
     let lines = match scroll.unit {
@@ -189,6 +215,7 @@ fn control_camera(
         MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
     };
     if lines != 0.0 {
+        rig.framing = None;
         rig.target_distance =
             (rig.target_distance * (1.0 - ZOOM_STEP).powf(lines)).clamp(MIN_DISTANCE, MAX_DISTANCE);
     }
@@ -207,6 +234,7 @@ fn control_camera(
 
     // Middle-button drag: move the camera so the grabbed ground point stays under the cursor.
     if buttons.just_pressed(MouseButton::Middle) {
+        rig.framing = None;
         rig.grab = cursor.and_then(|cursor| rig.ground_point(&camera, cursor));
     }
     if !buttons.pressed(MouseButton::Middle) {
@@ -217,6 +245,9 @@ fn control_camera(
     {
         rig.focus += (grab - under).xz();
     }
+
+    // Until the player takes over, the map stays framed whatever the window does.
+    keep_framed(&mut rig, &window);
 
     let limits = rig.limits;
     rig.focus = rig.focus.clamp(limits.min, limits.max);
