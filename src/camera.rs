@@ -1,6 +1,7 @@
 //! The overview camera: steep perspective, looking straight up the map so grid rows stay level
 //! on screen. It frames the whole map at the start, and keeps it framed as the window changes
-//! size (e.g. when a tiling window manager resizes it) until the player moves the camera.
+//! size (e.g. when a tiling window manager resizes it) until the player moves the camera. When
+//! the map grows, or new ground is offered, it glides out to show it ([`CameraRig::show`]).
 //!
 //! Pan with WASD or the arrow keys, or drag with the middle mouse button (the ground under the
 //! cursor sticks to it). Scroll to zoom toward the cursor.
@@ -54,6 +55,10 @@ pub struct CameraRig {
     /// The map area to keep framed, and the window aspect it was last framed for. Cleared once
     /// the player pans or zooms.
     framing: Option<(Rect, f32)>,
+    /// Whether the next framing glides there rather than jumping.
+    glide_next: bool,
+    /// The focus and distance the camera is gliding to, if it's on its way.
+    glide: Option<(Vec2, f32)>,
 }
 
 impl Default for CameraRig {
@@ -65,6 +70,8 @@ impl Default for CameraRig {
             grab: None,
             limits: Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(f32::MAX)),
             framing: None,
+            glide_next: false,
+            glide: None,
         }
     }
 }
@@ -83,6 +90,23 @@ impl CameraRig {
         camera
             .viewport_to_world(&GlobalTransform::from(self.transform()), screen)
             .ok()
+    }
+
+    /// The map now covers `area` (world x and z): the camera may look around all of it, and if
+    /// it's still framing the map, it glides to frame the new area. With `take_over`, it does so
+    /// even if the player has moved the camera.
+    pub fn show(&mut self, area: Rect, take_over: bool) {
+        self.limits = area.inflate(PAN_OVERSCROLL);
+        if take_over || self.framing.is_some() {
+            self.framing = Some((area, f32::NAN));
+            self.glide_next = true;
+        }
+    }
+
+    /// The player moved the camera: it stops framing the map.
+    fn take_control(&mut self) {
+        self.framing = None;
+        self.glide = None;
     }
 
     /// The ground point under a screen position.
@@ -144,9 +168,32 @@ fn keep_framed(rig: &mut CameraRig, window: &Window) {
         return;
     }
     rig.framing = Some((map, aspect));
-    rig.focus = map.center();
-    rig.distance = framing_distance(map, aspect);
+    let distance = framing_distance(map, aspect);
+    if std::mem::take(&mut rig.glide_next) {
+        rig.glide = Some((map.center(), distance));
+    } else {
+        rig.glide = None;
+        rig.focus = map.center();
+        rig.distance = distance;
+        rig.target_distance = distance;
+    }
+}
+
+/// Eases the camera along its glide, if it's on one.
+fn glide(rig: &mut CameraRig, dt: f32) {
+    let Some((focus, distance)) = rig.glide else {
+        return;
+    };
+    let ease = 1.0 - (-GLIDE_RATE * dt).exp();
+    rig.focus = rig.focus.lerp(focus, ease);
+    rig.distance = rig.distance.lerp(distance, ease);
     rig.target_distance = rig.distance;
+    if rig.focus.distance(focus) < 0.01 && (rig.distance - distance).abs() < 0.01 {
+        rig.focus = focus;
+        rig.distance = distance;
+        rig.target_distance = distance;
+        rig.glide = None;
+    }
 }
 
 fn spawn_camera(
@@ -206,7 +253,7 @@ fn control_camera(
     let speed = PAN_SPEED * rig.distance;
     rig.focus += pan.normalize_or_zero() * speed * dt;
     if pan != Vec2::ZERO {
-        rig.framing = None;
+        rig.take_control();
     }
 
     // Zoom, keeping the ground under the cursor where it is.
@@ -215,7 +262,7 @@ fn control_camera(
         MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
     };
     if lines != 0.0 {
-        rig.framing = None;
+        rig.take_control();
         rig.target_distance =
             (rig.target_distance * (1.0 - ZOOM_STEP).powf(lines)).clamp(MIN_DISTANCE, MAX_DISTANCE);
     }
@@ -234,7 +281,7 @@ fn control_camera(
 
     // Middle-button drag: move the camera so the grabbed ground point stays under the cursor.
     if buttons.just_pressed(MouseButton::Middle) {
-        rig.framing = None;
+        rig.take_control();
         rig.grab = cursor.and_then(|cursor| rig.ground_point(&camera, cursor));
     }
     if !buttons.pressed(MouseButton::Middle) {
@@ -248,6 +295,7 @@ fn control_camera(
 
     // Until the player takes over, the map stays framed whatever the window does.
     keep_framed(&mut rig, &window);
+    glide(&mut rig, dt);
 
     let limits = rig.limits;
     rig.focus = rig.focus.clamp(limits.min, limits.max);

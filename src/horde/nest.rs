@@ -1,13 +1,19 @@
 //! Nests as the player sees them: a dark pit ringed with chitin spikes and eggs, sitting in its
-//! crust of creep (drawn with the ground). It heaves when swarmers come out.
+//! crust of creep (drawn with the ground). It heaves when swarmers come out. A nest in a newly
+//! claimed chunk drops in with it, and one taken back sinks away with it.
 
 use super::{HordeSystems, SwarmersEmerged};
-use crate::juice::Squash;
-use crate::map::{Landmarks, NEST_HEIGHT};
+use crate::build::BuildSystems;
+use crate::grid::{Footprint, Grid};
+use crate::juice::{Squash, Tween, TweenTarget};
+use crate::map::{ChunkChanged, NEST_HEIGHT};
 use crate::palette;
 use crate::rng::Rng;
 use crate::shapes::{BoxMesh, ShapeMaterial, shade, vary};
-use crate::tuning::juice::{NEST_PULSE, NEST_PULSE_INTERVAL};
+use crate::tuning::juice::{
+    CHUNK_DROP_HEIGHT, CHUNK_DROP_SECONDS, CHUNK_SINK_DEPTH, CHUNK_SINK_SECONDS, NEST_PULSE,
+    NEST_PULSE_INTERVAL,
+};
 use bevy::prelude::*;
 
 /// Spikes around the rim, and how tall they stand.
@@ -23,40 +29,110 @@ pub struct NestPlugin;
 impl Plugin for NestPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_nests)
+            .add_systems(Update, follow_nests.after(BuildSystems))
             .add_systems(Update, heave.after(HordeSystems));
     }
 }
 
 #[derive(Component)]
 struct NestView {
-    index: usize,
+    nest: Footprint,
     /// When it last heaved (game seconds).
     heaved: f32,
 }
 
+/// A nest's own seed for its look, so it looks the same whenever it's drawn.
+pub fn nest_seed(nest: Footprint) -> u64 {
+    ((nest.min.x as u32 as u64) << 32) | nest.min.y as u32 as u64
+}
+
 fn spawn_nests(
     mut commands: Commands,
-    landmarks: Res<Landmarks>,
+    grid: Res<Grid>,
     material: Res<ShapeMaterial>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    for (index, nest) in landmarks.nests.iter().enumerate() {
-        let mesh = meshes.add(nest_mesh(nest.size as f32, index as u64));
-        commands.spawn((
+    for &nest in &grid.nests {
+        spawn_nest(&mut commands, &material, &mut meshes, nest);
+    }
+}
+
+fn spawn_nest(
+    commands: &mut Commands,
+    material: &ShapeMaterial,
+    meshes: &mut Assets<Mesh>,
+    nest: Footprint,
+) -> Entity {
+    let mesh = meshes.add(nest_mesh(nest.size as f32, nest_seed(nest)));
+    commands
+        .spawn((
             NestView {
-                index,
+                nest,
                 heaved: f32::NEG_INFINITY,
             },
             Mesh3d(mesh),
             MeshMaterial3d(material.0.clone()),
             Transform::from_translation(nest.center() + Vec3::Y * NEST_HEIGHT),
             Squash::new(Vec3::ONE),
-        ));
+        ))
+        .id()
+}
+
+/// Nests come and go with the chunks they're in: a new one drops in with its chunk, and one
+/// taken off the map sinks away with it.
+fn follow_nests(
+    mut commands: Commands,
+    mut changes: MessageReader<ChunkChanged>,
+    grid: Res<Grid>,
+    material: Res<ShapeMaterial>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    views: Query<(Entity, &NestView, &Transform)>,
+) {
+    let changes: Vec<ChunkChanged> = changes.read().copied().collect();
+    if changes.is_empty() {
+        return;
+    }
+    for (entity, view, transform) in &views {
+        if grid.nests.contains(&view.nest) {
+            continue;
+        }
+        let from = transform.translation;
+        commands.entity(entity).remove::<NestView>().insert(
+            Tween::new(
+                TweenTarget::Translation {
+                    from,
+                    to: from - Vec3::Y * CHUNK_SINK_DEPTH,
+                },
+                EaseFunction::QuadraticIn,
+                0.0,
+                CHUNK_SINK_SECONDS,
+            )
+            .then_despawn(),
+        );
+    }
+    for &nest in &grid.nests {
+        if views.iter().any(|(_, view, _)| view.nest == nest) {
+            continue;
+        }
+        let entity = spawn_nest(&mut commands, &material, &mut meshes, nest);
+        let to = nest.center() + Vec3::Y * NEST_HEIGHT;
+        let drop = Tween::new(
+            TweenTarget::Translation {
+                from: to + Vec3::Y * CHUNK_DROP_HEIGHT,
+                to,
+            },
+            EaseFunction::QuadraticIn,
+            0.0,
+            CHUNK_DROP_SECONDS,
+        );
+        commands
+            .entity(entity)
+            .insert((drop.start_transform(), drop));
     }
 }
 
 /// A nest `size` cells across, centered on the origin.
-fn nest_mesh(size: f32, seed: u64) -> Mesh {
+pub fn nest_mesh(size: f32, seed: u64) -> Mesh {
     let mut rng = Rng::new(seed ^ 0x4E57);
     let mut mesh = BoxMesh::default();
     let half = size / 2.0;
@@ -123,13 +199,17 @@ fn nest_mesh(size: f32, seed: u64) -> Mesh {
 /// A nest heaves as swarmers come out of it, at most so often.
 fn heave(
     time: Res<Time>,
+    grid: Res<Grid>,
     mut emerged: MessageReader<SwarmersEmerged>,
     mut nests: Query<(&mut NestView, &mut Squash)>,
 ) {
     let now = time.elapsed_secs();
     for SwarmersEmerged { nest } in emerged.read() {
+        let Some(&nest) = grid.nests.get(*nest) else {
+            continue;
+        };
         for (mut view, mut squash) in &mut nests {
-            if view.index == *nest && now - view.heaved >= NEST_PULSE_INTERVAL {
+            if view.nest == nest && now - view.heaved >= NEST_PULSE_INTERVAL {
                 view.heaved = now;
                 squash.pulse(NEST_PULSE);
             }

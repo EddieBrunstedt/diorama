@@ -9,6 +9,7 @@
 mod abilities;
 mod build;
 mod camera;
+mod chunks;
 mod command_center;
 mod dev;
 mod economy;
@@ -60,6 +61,7 @@ fn main() {
         ))
         .add_plugins((
             horde::HordePlugin,
+            chunks::ChunksPlugin,
             command_center::CommandCenterPlugin,
             preview::PreviewPlugin,
             abilities::AbilitiesPlugin,

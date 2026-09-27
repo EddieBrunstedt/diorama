@@ -4,7 +4,8 @@
 //! on it and deals damage.
 //!
 //! The wave loop ([`crate::waves`]) lets them out in packs through [`SpawnQueue`] and
-//! [`BruteQueue`], and each wave's enemies are tougher ([`Toughness`]). Once the Command Center
+//! [`BruteQueue`], and each wave's enemies are tougher ([`Toughness`]). The nests take turns, so
+//! each gets an even share of the wave (see [`crate::waves::plan::nest_share`]). Once the Command Center
 //! has fallen, the horde swarms over its ruin instead of bursting on it.
 //!
 //! Thousands of swarmers can be on the map at once: they share one mesh and one material so
@@ -22,6 +23,7 @@ mod nest;
 
 use crate::command_center::CommandCenterHit;
 use crate::flow::{Class, FlowFields, FlowSystems};
+use crate::grid::Grid;
 use crate::map::Landmarks;
 use crate::palette;
 use crate::rng::{Rng, RunSeed};
@@ -37,6 +39,7 @@ use bevy::{ecs::system::SystemParam, prelude::*, utils::Parallel};
 pub use brute::{Brute, BruteQueue};
 use crowd::{CrowdIndex, push_out, separation, shove, steer, touches, walls_in_the_way};
 pub use death::{DeathSystems, EnemyKilled};
+pub use nest::{nest_mesh, nest_seed};
 
 /// Longest step the crowd moves at once, so a hitch can't throw swarmers through walls.
 const MAX_STEP: f32 = 1.0 / 20.0;
@@ -54,7 +57,7 @@ impl Plugin for HordePlugin {
             .add_plugins((nest::NestPlugin, brute::BrutePlugin, death::DeathPlugin))
             .configure_sets(Update, DamageSystems.after(HordeSystems))
             .add_systems(Startup, seed_horde)
-            .add_systems(OnEnter(Phase::Wave), toughen)
+            .add_systems(OnEnter(Phase::Wave), (toughen, first_nest_first))
             .add_systems(OnEnter(Phase::GameOver), stop_spawning)
             .add_systems(OnExit(Phase::GameOver), (stop_spawning, clear_horde))
             .add_systems(
@@ -148,6 +151,8 @@ pub struct SpawnQueue {
     rate: f32,
     /// Fractions of a swarmer owed from earlier frames.
     owed: f32,
+    /// How many have come out this wave: the nests take turns.
+    turn: usize,
 }
 
 impl SpawnQueue {
@@ -276,6 +281,12 @@ fn toughen(wave: Res<CurrentWave>, mut toughness: ResMut<Toughness>) {
     toughness.0 = wave.0.toughness;
 }
 
+/// Every wave, the nests take turns from the first one, so each gets the share its label shows.
+fn first_nest_first(mut swarmers: ResMut<SpawnQueue>, mut brutes: ResMut<BruteQueue>) {
+    swarmers.turn = 0;
+    brutes.turn = 0;
+}
+
 fn stop_spawning(mut swarmers: ResMut<SpawnQueue>, mut brutes: ResMut<BruteQueue>) {
     swarmers.clear();
     brutes.clear();
@@ -291,7 +302,7 @@ fn clear_horde(mut commands: Commands, enemies: Query<Entity, With<Health>>) {
 fn spawn_swarmers(
     mut commands: Commands,
     time: Res<Time>,
-    landmarks: Res<Landmarks>,
+    grid: Res<Grid>,
     assets: Res<SwarmerAssets>,
     material: Res<ShapeMaterial>,
     toughness: Res<Toughness>,
@@ -299,7 +310,7 @@ fn spawn_swarmers(
     mut rng: ResMut<HordeRng>,
     mut emerged: MessageWriter<SwarmersEmerged>,
 ) {
-    if queue.waiting == 0 {
+    if queue.waiting == 0 || grid.nests.is_empty() {
         queue.owed = 0.0;
         return;
     }
@@ -308,12 +319,15 @@ fn spawn_swarmers(
     queue.owed -= count as f32;
     queue.waiting -= count;
     let rng = &mut rng.0;
-    let mut from = vec![false; landmarks.nests.len()];
-    let batch: Vec<_> = (0..count)
-        .map(|_| {
-            let nest = rng.index(landmarks.nests.len());
+    let nests = &grid.nests;
+    let mut from = vec![false; nests.len()];
+    let first = queue.turn;
+    queue.turn += count as usize;
+    let batch: Vec<_> = (0..count as usize)
+        .map(|i| {
+            let nest = (first + i) % nests.len();
             from[nest] = true;
-            let area = landmarks.nests[nest].area();
+            let area = nests[nest].area();
             let inset = SWARMER_RADIUS;
             let at = Vec2::new(
                 rng.range(area.min.x + inset, area.max.x - inset),

@@ -153,3 +153,11 @@ pub const ABILITY_PIP_EMPTY: Color = Color::srgba(1.0, 1.0, 1.0, 0.15);
 pub const ABILITY_TRACK: Color = Color::srgba(1.0, 1.0, 1.0, 0.1);
 pub const ABILITY_RELOAD: Color = Color::srgba(0.45, 0.95, 1.0, 0.45);
 pub const ABILITY_FULL: Color = Color::srgb(0.45, 0.95, 1.0);
+
+/// New ground on offer after a wave: the chunks are drawn dimmed and cool until the cursor is on
+/// one, framed in cyan (plain ground) or the horde's red (a chunk with a nest, a new front), and
+/// named by a label.
+pub const OFFER_TINT: Color = Color::srgb(0.42, 0.48, 0.58);
+pub const OFFER_TINT_HOVER: Color = Color::srgb(0.9, 0.95, 1.0);
+pub const OFFER_FRAME: Color = Color::srgb(0.45, 0.95, 1.0);
+pub const OFFER_FRAME_NEST: Color = Color::srgb(1.0, 0.3, 0.35);

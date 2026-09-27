@@ -3,6 +3,7 @@
 //! When something can't be paid for, the counter flashes red and shakes.
 
 use crate::camera::MainCamera;
+use crate::chunks::ChunkClaimed;
 use crate::economy::{CantAfford, Earned, EconomySystems, Wallet};
 use crate::flow::Class;
 use crate::map::Landmarks;
@@ -172,6 +173,7 @@ fn pop_rewards(
     mut commands: Commands,
     time: Res<Time<Real>>,
     mut cleared: MessageReader<WaveCleared>,
+    mut claimed: MessageReader<ChunkClaimed>,
     landmarks: Res<Landmarks>,
     camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
     mut pops: Query<(
@@ -186,6 +188,9 @@ fn pop_rewards(
     for wave in cleared.read() {
         let above = landmarks.command_center.center() + Vec3::Y * 2.0;
         commands.spawn(pop(above, wave.bonus));
+    }
+    for claim in claimed.read().filter(|claim| claim.bounty > 0) {
+        commands.spawn(pop(claim.at + Vec3::Y * 1.5, claim.bounty));
     }
     let (camera, transform) = *camera;
     for (entity, mut pop, mut node, mut visibility, mut color, computed) in &mut pops {

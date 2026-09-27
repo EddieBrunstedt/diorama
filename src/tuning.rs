@@ -126,6 +126,21 @@ pub mod economy {
     pub const REPAIR_FRACTION: f32 = 0.5;
     /// Repairing the Command Center (in the build phase) costs this much per HP put back.
     pub const COMMAND_CENTER_REPAIR_PER_HP: f64 = 0.2;
+    /// Claiming a chunk with a nest in it pays this much, plus this much more for every wave
+    /// after the first: the price of opening a new front.
+    pub const NEST_BOUNTY: u32 = 40;
+    pub const NEST_BOUNTY_PER_WAVE: u32 = 5;
+}
+
+/// Claiming chunks: after every wave, pick one of a few chunks at the edge of the map to add to
+/// it. See [`crate::chunks`].
+pub mod chunks {
+    /// How many chunks each offer holds, each at its own place along the frontier. One of them
+    /// always has a nest, one never does, and the rest have one at a chance that grows from the
+    /// first number (after wave 1) to the second (after `NEST_CHANCE_WAVES`).
+    pub const OFFERED: usize = 3;
+    pub const NEST_CHANCE: (f32, f32) = (0.2, 0.8);
+    pub const NEST_CHANCE_WAVES: u32 = 20;
 }
 
 /// Waves: how big they get, what's in them, and how they come out of the nests. See
@@ -242,11 +257,13 @@ pub mod camera {
     pub const FRAMING_MARGIN: f32 = 1.12;
     /// Closest and farthest zoom, as the distance from the camera to the ground point it looks at.
     pub const MIN_DISTANCE: f32 = 10.0;
-    pub const MAX_DISTANCE: f32 = 90.0;
+    pub const MAX_DISTANCE: f32 = 200.0;
     /// How much one scroll notch zooms, as a fraction of the distance.
     pub const ZOOM_STEP: f32 = 0.14;
     /// How quickly the camera eases to a new zoom (per second, exponential).
     pub const ZOOM_EASE_RATE: f32 = 16.0;
+    /// How quickly it glides to frame the map when the map grows or new ground is offered.
+    pub const GLIDE_RATE: f32 = 5.0;
     /// Keyboard pan speed, as a fraction of the camera distance per second, so it feels the same
     /// at every zoom.
     pub const PAN_SPEED: f32 = 1.0;
@@ -457,6 +474,19 @@ pub mod juice {
     /// long (seconds) when it can't be used.
     pub const ABILITY_READY_POP: f32 = 0.18;
     pub const ABILITY_DENIED_SECONDS: f32 = 0.35;
+
+    /// A claimed chunk drops onto the map from this high, taking this long (seconds), and lands
+    /// with dust all along its edges and a shake. A chunk given back (undo) sinks away this far.
+    pub const CHUNK_DROP_HEIGHT: f32 = 4.0;
+    pub const CHUNK_DROP_SECONDS: f32 = 0.22;
+    pub const CHUNK_SINK_DEPTH: f32 = 1.5;
+    pub const CHUNK_SINK_SECONDS: f32 = 0.18;
+    pub const CHUNK_DUST_PER_SIDE: usize = 8;
+    pub const CHUNK_LAND_SHAKE: f32 = 0.45;
+    /// The offered chunks' frames pulse this many times a second, and one lifts this high when
+    /// the cursor is on it.
+    pub const OFFER_PULSE_RATE: f32 = 1.2;
+    pub const OFFER_HOVER_LIFT: f32 = 0.25;
 
     /// Fire, sparks, flashes and tracers glow this many times brighter than their color.
     pub const GLOW_BRIGHTNESS: f32 = 2.5;

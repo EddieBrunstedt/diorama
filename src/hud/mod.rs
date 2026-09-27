@@ -2,13 +2,16 @@
 //! phase and the size of the horde at the top, a controls hint for the phase under the money, the
 //! wave preview and the game-over screen ([`wave`]), and a small HP bar over the wall, tower or
 //! Command Center under the cursor, with what selling or repairing it would pay or cost (in the
-//! build phase). Undo and redo dim when there's nothing to undo or redo.
+//! build phase). Undo and redo dim when there's nothing to undo or redo. Labels name the chunks
+//! offered after a wave ([`offer`]).
 
 mod money;
+mod offer;
 mod wave;
 
 use crate::build::history::History;
 use crate::camera::MainCamera;
+use crate::chunks::ChunkOffer;
 use crate::economy::{
     Wallet, affordable_command_center_repair, affordable_repair, command_center_repair_cost,
     sell_value,
@@ -38,12 +41,16 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((money::MoneyPlugin, wave::WaveHudPlugin))
-            .add_systems(Startup, (spawn_hint, spawn_status, spawn_wall_bar))
-            .add_systems(
-                Update,
-                (show_hint, show_status, show_wall_bar.after(PointerSystems)),
-            );
+        app.add_plugins((
+            money::MoneyPlugin,
+            wave::WaveHudPlugin,
+            offer::OfferHudPlugin,
+        ))
+        .add_systems(Startup, (spawn_hint, spawn_status, spawn_wall_bar))
+        .add_systems(
+            Update,
+            (show_hint, show_status, show_wall_bar.after(PointerSystems)),
+        );
     }
 }
 
@@ -181,6 +188,8 @@ enum HintLine {
     Always,
     Undo,
     Redo,
+    /// While a chunk has to be claimed.
+    Claim,
 }
 
 fn spawn_hint(mut commands: Commands) {
@@ -199,6 +208,7 @@ fn spawn_hint(mut commands: Commands) {
         .with_children(|hint| {
             let build = HintLine::In(Phase::Build);
             for (line, text) in [
+                (HintLine::Claim, "Left click a marked chunk: claim it"),
                 (build, "1-5: pick what to build"),
                 (build, "Left click: build, or repair (drag for a line)"),
                 (build, "Right click: sell (drag for a line)"),
@@ -229,18 +239,22 @@ fn spawn_hint(mut commands: Commands) {
 fn show_hint(
     history: Res<History>,
     phase: Res<State<Phase>>,
+    grid: Res<Grid>,
+    offer: Res<ChunkOffer>,
     mut lines: Query<(&HintLine, &mut TextColor, &mut Node)>,
 ) {
-    if !history.is_changed() && !phase.is_changed() {
+    if !history.is_changed() && !phase.is_changed() && !offer.is_changed() && !grid.is_changed() {
         return;
     }
     let building = *phase.get() == Phase::Build;
+    let claiming = building && offer.pending(&grid);
     for (line, mut color, mut node) in &mut lines {
         let (shown, usable) = match *line {
             HintLine::In(only) => (only == *phase.get(), true),
             HintLine::Always => (true, true),
             HintLine::Undo => (building, history.can_undo()),
             HintLine::Redo => (building, history.can_redo()),
+            HintLine::Claim => (claiming, true),
         };
         let display = if shown { Display::Flex } else { Display::None };
         if node.display != display {

@@ -10,6 +10,7 @@
 //! - Right click sells, and right drag sells along a line.
 //! - Esc, or the other mouse button, cancels a drag in progress.
 //! - Ctrl+Z undoes the last click or drag, Ctrl+Shift+Z (or Ctrl+Y) redoes, money and all.
+//! - Claiming a chunk ([`crate::chunks`]) goes into the same history, so it can be undone too.
 //! - Starting the wave commits what was built, which now sells at a loss, and clears the undo
 //!   history. Nothing can be built, sold or repaired until the wave is over.
 //! - A new run clears away everything built.
@@ -25,6 +26,7 @@ mod panel;
 use crate::command_center::CommandCenterRepaired;
 use crate::economy::{CantAfford, Wallet};
 use crate::grid::{Change, Grid, Kind, Structure};
+use crate::map::ChunkChanged;
 use crate::pointer::{Pointer, PointerSystems, cell_top};
 use crate::waves::Phase;
 use bevy::prelude::*;
@@ -106,7 +108,7 @@ fn commit(mut grid: ResMut<Grid>, mut history: ResMut<History>, mut active: ResM
 
 /// A new run: everything built is gone (the Command Center stands up again in
 /// [`crate::command_center`]).
-fn clear_the_map(
+pub fn clear_the_map(
     mut grid: ResMut<Grid>,
     mut history: ResMut<History>,
     mut active: ResMut<ActiveStroke>,
@@ -119,13 +121,14 @@ fn clear_the_map(
 
 /// Tells whatever follows the map what an edit did.
 #[derive(bevy::ecs::system::SystemParam)]
-struct Report<'w> {
+pub struct Report<'w> {
     changed: MessageWriter<'w, StructureChanged>,
     repaired: MessageWriter<'w, CommandCenterRepaired>,
+    chunks: MessageWriter<'w, ChunkChanged>,
 }
 
 impl Report<'_> {
-    fn send(&mut self, actions: Vec<Action>) {
+    pub fn send(&mut self, actions: Vec<Action>) {
         for action in actions {
             match action {
                 Action::Cell(change) => {
@@ -134,12 +137,21 @@ impl Report<'_> {
                 Action::CommandCenter { from, to, .. } => {
                     self.repaired.write(CommandCenterRepaired { from, to });
                 }
+                Action::Claim { claim, claimed } => {
+                    self.chunks.write(ChunkChanged {
+                        at: claim.slot,
+                        claimed,
+                    });
+                }
             }
         }
     }
 }
 
-fn strokes(
+/// Clicks and drags on the map. A click off the map is left to whatever is there (a chunk on
+/// offer, see `crate::chunks`), which runs after this, so the click never builds on the chunk it
+/// just claimed.
+pub fn strokes(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     pointer: Res<Pointer>,
@@ -190,7 +202,9 @@ fn strokes(
     if ui.0 {
         return;
     }
-    let Some(cell) = pointer.cell else {
+    // Off the map there's nothing to build on (the chunks offered there are claimed by
+    // `crate::chunks`).
+    let Some(cell) = pointer.cell.filter(|&cell| grid.cell(cell).is_some()) else {
         return;
     };
     // A left click on something damaged repairs it; anywhere else it builds.

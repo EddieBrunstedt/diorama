@@ -1,7 +1,9 @@
 //! Building as plain data: strokes (a click or a drag, applied live to the grid) and the
 //! undo/redo history of finished strokes. Money goes with every change: a stroke only does what
-//! the wallet can pay for, and undo gives back exactly what an edit took.
+//! the wallet can pay for, and undo gives back exactly what an edit took. Claiming a chunk is an
+//! edit too ([`claim_chunk`]), so it can be taken back until the wave starts.
 
+use crate::chunks::templates::Claim;
 use crate::economy::{
     Wallet, affordable_command_center_repair, affordable_repair, change_cost,
     command_center_repair_cost,
@@ -42,6 +44,11 @@ pub enum Action {
         from: u32,
         to: u32,
     },
+    /// Added a chunk to the map (`claimed`), or took it off again.
+    Claim {
+        claim: Claim,
+        claimed: bool,
+    },
 }
 
 impl Action {
@@ -50,6 +57,7 @@ impl Action {
         match self {
             Action::Cell(change) => change.cell,
             Action::CommandCenter { cell, .. } => cell,
+            Action::Claim { claim, .. } => Grid::chunk_origin(claim.slot),
         }
     }
 
@@ -57,7 +65,7 @@ impl Action {
     pub fn change(self) -> Option<Change> {
         match self {
             Action::Cell(change) => Some(change),
-            Action::CommandCenter { .. } => None,
+            Action::CommandCenter { .. } | Action::Claim { .. } => None,
         }
     }
 
@@ -70,6 +78,10 @@ impl Action {
                 from: to,
                 to: from,
             },
+            Action::Claim { claim, claimed } => Action::Claim {
+                claim,
+                claimed: !claimed,
+            },
         }
     }
 
@@ -78,6 +90,15 @@ impl Action {
         match self {
             Action::Cell(change) => grid.structure(change.cell) == change.after,
             Action::CommandCenter { to, .. } => grid.command_center.hp == to,
+            // A chunk only comes off the map with nothing built on it.
+            Action::Claim {
+                claim,
+                claimed: true,
+            } => claim.can_take_off(grid),
+            Action::Claim {
+                claim,
+                claimed: false,
+            } => grid.chunk(claim.slot).is_none(),
         }
     }
 
@@ -96,6 +117,14 @@ impl Action {
                 }
                 grid.command_center.hp = to;
                 Some(self)
+            }
+            Action::Claim { claim, claimed } => {
+                let done = if claimed {
+                    claim.add_to(grid)
+                } else {
+                    claim.take_off(grid)
+                };
+                done.then_some(self)
             }
         }
     }
@@ -291,6 +320,27 @@ impl Stroke {
             entries: self.entries,
         }
     }
+}
+
+/// Claims a chunk, taking `bounty` for it. Returns the edit (one undo step) and what it did to
+/// the map, or `None` if there's a chunk there already.
+pub fn claim_chunk(
+    claim: Claim,
+    bounty: u32,
+    grid: &mut Grid,
+    wallet: &mut Wallet,
+) -> Option<(Edit, Action)> {
+    let action = Action::Claim {
+        claim,
+        claimed: true,
+    }
+    .apply(grid)?;
+    let cost = -(bounty as i64);
+    wallet.pay(cost);
+    let edit = Edit {
+        entries: vec![Entry { action, cost }],
+    };
+    Some((edit, action))
 }
 
 /// Undoes one entry, giving back what it cost (or paying back what it paid), if the map still
@@ -857,5 +907,77 @@ mod tests {
         history.record(stroke.finish());
         history.clear();
         assert!(!history.can_undo() && !history.can_redo());
+    }
+
+    fn nest_claim() -> Claim {
+        use crate::chunks::templates::{Orientation, Side, TEMPLATES};
+        Claim {
+            slot: IVec2::new(0, -1),
+            template: TEMPLATES.iter().position(|t| t.has_nest()).unwrap(),
+            orientation: Orientation {
+                facing: Side::South,
+                mirror: false,
+            },
+        }
+    }
+
+    #[test]
+    fn a_claim_is_undone_like_any_edit() {
+        let mut grid = grid();
+        let mut wallet = Wallet::new(10);
+        let mut history = History::default();
+        let claim = nest_claim();
+        let (edit, action) = claim_chunk(claim, 45, &mut grid, &mut wallet).unwrap();
+        history.record(edit);
+        assert_eq!(
+            action,
+            Action::Claim {
+                claim,
+                claimed: true
+            }
+        );
+        assert!(grid.chunk(claim.slot).is_some());
+        assert_eq!(grid.nests.len(), 1);
+        assert_eq!(wallet.money(), 55, "the bounty");
+        assert!(
+            claim_chunk(claim, 45, &mut grid, &mut wallet).is_none(),
+            "taken"
+        );
+
+        // Building on the new ground, then undoing all of it: the wall first, then the claim.
+        let cell = Grid::chunk_origin(claim.slot) + IVec2::new(3, 14);
+        let (stroke, _) = Stroke::begin(WALL, cell, &mut grid, &mut wallet);
+        history.record(stroke.finish());
+        history.undo(&mut grid, &mut wallet).unwrap();
+        let undone = history.undo(&mut grid, &mut wallet).unwrap();
+        assert_eq!(
+            undone,
+            vec![Action::Claim {
+                claim,
+                claimed: false
+            }]
+        );
+        assert!(grid.chunk(claim.slot).is_none());
+        assert!(grid.nests.is_empty());
+        assert_eq!(wallet.money(), 10, "bounty given back");
+
+        // And again.
+        history.redo(&mut grid, &mut wallet).unwrap();
+        assert!(grid.chunk(claim.slot).is_some());
+        assert_eq!(wallet.money(), 55);
+    }
+
+    #[test]
+    fn a_spent_bounty_keeps_the_claim() {
+        let mut grid = grid();
+        let mut wallet = Wallet::new(0);
+        let mut history = History::default();
+        let claim = nest_claim();
+        let (edit, _) = claim_chunk(claim, 45, &mut grid, &mut wallet).unwrap();
+        history.record(edit);
+        // Spent where undo can't see it (e.g. a repair that was then committed).
+        assert!(wallet.pay(40));
+        assert_eq!(history.undo(&mut grid, &mut wallet), Err(TooExpensive));
+        assert!(grid.chunk(claim.slot).is_some());
     }
 }

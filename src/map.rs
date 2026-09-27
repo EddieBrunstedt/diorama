@@ -1,11 +1,20 @@
-//! The map: the hand-authored starting [`Grid`], where the Command Center and the nests are
-//! ([`Landmarks`]), and the ground it's drawn as, one mesh per chunk.
+//! The map: the hand-authored starting [`Grid`] (with its nests), where the Command Center is
+//! ([`Landmarks`]), and the ground it's drawn as, one mesh per chunk. The map grows as chunks are
+//! claimed ([`crate::chunks`]): each [`ChunkChanged`] redraws the ground around it, and a claimed
+//! chunk drops onto the map with a slam. A new run takes the map back to the starting one.
 
+use crate::build::{BuildSystems, clear_the_map};
 use crate::grid::{Chunk, Footprint, Grid, Structure, Terrain};
+use crate::juice::{Burst, Particles, Shake, Tween, TweenDone, TweenTarget};
 use crate::palette;
 use crate::rng::Rng;
 use crate::shapes::{BoxMesh, ShapeMaterial, shade, vary};
 use crate::tuning::grid::{CHUNK_SIZE, COMMAND_CENTER_SIZE, NEST_SIZE, STARTING_CHUNKS};
+use crate::tuning::juice::{
+    CHUNK_DROP_HEIGHT, CHUNK_DROP_SECONDS, CHUNK_DUST_PER_SIDE, CHUNK_LAND_SHAKE, CHUNK_SINK_DEPTH,
+    CHUNK_SINK_SECONDS, DUST_LIFETIME, DUST_LIFT, DUST_SIZE, DUST_SPREAD,
+};
+use crate::waves::Phase;
 use bevy::prelude::*;
 
 /// Gap between neighboring cells' tiles, and the width of the seam along chunk borders.
@@ -92,20 +101,45 @@ impl Plugin for MapPlugin {
             .insert_resource(landmarks)
             .init_resource::<ShapeMaterial>()
             .init_resource::<MudMaterial>()
-            .add_systems(Startup, spawn_ground);
+            .add_message::<ChunkChanged>()
+            .add_systems(Startup, spawn_ground)
+            .add_systems(
+                OnExit(Phase::GameOver),
+                back_to_the_starting_map.after(clear_the_map),
+            )
+            .add_systems(Update, follow_chunks.after(BuildSystems))
+            .add_observer(land_chunk);
     }
 }
 
-/// Where the Command Center and the nests are.
+/// Where the Command Center is. (The nests are in the [`Grid`], since claiming chunks adds them.)
 #[derive(Resource, Clone, Debug)]
 pub struct Landmarks {
     pub command_center: Footprint,
-    pub nests: Vec<Footprint>,
+}
+
+/// A chunk was added to the map (`claimed`) or taken off it.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct ChunkChanged {
+    pub at: IVec2,
+    pub claimed: bool,
 }
 
 /// The hand-authored starting map ([`STARTING_MAP`]) and its landmarks.
 pub fn starting_map() -> (Grid, Landmarks) {
     read_map(&STARTING_MAP, -STARTING_CHUNKS / 2 * CHUNK_SIZE)
+}
+
+/// The terrain a map drawing's character stands for: `.` ground, `#` rock, `~` mud, `N` nest.
+/// (`C`, the Command Center, stands on ground, but only a whole map can have one.)
+pub fn terrain_of(char: char) -> Option<Terrain> {
+    match char {
+        '.' => Some(Terrain::Ground),
+        '#' => Some(Terrain::Rock),
+        '~' => Some(Terrain::Mud),
+        'N' => Some(Terrain::Nest),
+        _ => None,
+    }
 }
 
 /// Reads a map drawn as rows of characters (see [`STARTING_MAP`]), whose first character is cell
@@ -126,31 +160,20 @@ pub fn read_map(rows: &[&str], origin: i32) -> (Grid, Landmarks) {
                 grid.insert_chunk(chunk, Chunk::new(Terrain::Ground));
             }
             let terrain = match char {
-                '.' => Terrain::Ground,
-                '#' => Terrain::Rock,
-                '~' => Terrain::Mud,
-                'N' => {
-                    nest_cells.push(cell);
-                    Terrain::Nest
-                }
                 'C' => {
                     command_center.push(cell);
                     Terrain::Ground
                 }
-                other => panic!("unknown map character {other:?} at {cell}"),
+                other => terrain_of(other)
+                    .unwrap_or_else(|| panic!("unknown map character {other:?} at {cell}")),
             };
+            if terrain == Terrain::Nest {
+                nest_cells.push(cell);
+            }
             grid.set_terrain(cell, terrain);
         }
     }
 
-    let square = |cells: &[IVec2], min: IVec2, size: i32| {
-        let footprint = Footprint { min, size };
-        assert!(
-            footprint.cells().all(|cell| cells.contains(&cell)),
-            "{footprint:?} isn't a whole {size}×{size} square"
-        );
-        footprint
-    };
     let min = command_center
         .iter()
         .copied()
@@ -166,25 +189,42 @@ pub fn read_map(rows: &[&str], origin: i32) -> (Grid, Landmarks) {
         grid.set_structure(cell, Some(Structure::CommandCenter));
     }
 
-    // Each nest starts at its lowest cell, in reading order.
+    grid.nests = find_nests(&nest_cells);
+    let landmarks = Landmarks {
+        command_center: command_center_footprint,
+    };
+    (grid, landmarks)
+}
+
+/// The footprint of a square of `size` cells starting at `min`, checking that `cells` holds all of
+/// it.
+fn square(cells: &[IVec2], min: IVec2, size: i32) -> Footprint {
+    let footprint = Footprint { min, size };
+    assert!(
+        footprint.cells().all(|cell| cells.contains(&cell)),
+        "{footprint:?} isn't a whole {size}×{size} square"
+    );
+    footprint
+}
+
+/// The nests that `cells` (the nest cells of a drawing, in reading order) make up, each starting
+/// at its lowest cell.
+///
+/// Panics if they don't make up whole, separate nests.
+pub fn find_nests(cells: &[IVec2]) -> Vec<Footprint> {
     let mut nests: Vec<Footprint> = Vec::new();
-    for &cell in &nest_cells {
+    for &cell in cells {
         if nests.iter().any(|nest| nest.cells().any(|c| c == cell)) {
             continue;
         }
-        nests.push(square(&nest_cells, cell, NEST_SIZE));
+        nests.push(square(cells, cell, NEST_SIZE));
     }
     assert_eq!(
         nests.len() as i32 * NEST_SIZE * NEST_SIZE,
-        nest_cells.len() as i32,
+        cells.len() as i32,
         "nests overlap"
     );
-
-    let landmarks = Landmarks {
-        command_center: command_center_footprint,
-        nests,
-    };
-    (grid, landmarks)
+    nests
 }
 
 /// How tall the terrain on a cell stands, for putting things on top of it (0 outside the map).
@@ -225,7 +265,7 @@ const AROUND: [IVec2; 8] = [
 
 /// The material wet mud is drawn with: the vertex colors of [`ShapeMaterial`], but glossy.
 #[derive(Resource)]
-struct MudMaterial(Handle<StandardMaterial>);
+pub struct MudMaterial(pub Handle<StandardMaterial>);
 
 impl FromWorld for MudMaterial {
     fn from_world(world: &mut World) -> Self {
@@ -239,34 +279,204 @@ impl FromWorld for MudMaterial {
     }
 }
 
-fn spawn_ground(
-    mut commands: Commands,
-    grid: Res<Grid>,
-    material: Res<ShapeMaterial>,
-    mud: Res<MudMaterial>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    for (at, _) in grid.chunks() {
+/// A chunk's ground (its tiles and rock, or its mud): redrawn when the chunks around it change.
+#[derive(Component)]
+struct Ground {
+    chunk: IVec2,
+}
+
+/// The ground of a newly claimed chunk, dropping onto the map. It slams down when it lands.
+#[derive(Component)]
+struct Landing;
+
+/// What ground is drawn with.
+#[derive(bevy::ecs::system::SystemParam)]
+struct GroundAssets<'w> {
+    material: Res<'w, ShapeMaterial>,
+    mud: Res<'w, MudMaterial>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+}
+
+impl GroundAssets<'_> {
+    /// Spawns the ground of the chunk at `at`, returning its entities (the ground, and its mud if
+    /// it has any).
+    fn spawn(&mut self, commands: &mut Commands, grid: &Grid, at: IVec2) -> Vec<Entity> {
         let origin = Grid::chunk_origin(at);
         let transform = Transform::from_xyz(origin.x as f32, 0.0, origin.y as f32);
-        commands.spawn((
-            Mesh3d(meshes.add(chunk_mesh(&grid, at))),
-            MeshMaterial3d(material.0.clone()),
-            transform,
-        ));
-        if let Some(mesh) = mud_mesh(&grid, at) {
-            commands.spawn((
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(mud.0.clone()),
-                transform,
-            ));
+        let mut entities = vec![
+            commands
+                .spawn((
+                    Ground { chunk: at },
+                    Mesh3d(self.meshes.add(chunk_mesh(grid, at))),
+                    MeshMaterial3d(self.material.0.clone()),
+                    transform,
+                ))
+                .id(),
+        ];
+        if let Some(mesh) = mud_mesh(grid, at) {
+            entities.push(
+                commands
+                    .spawn((
+                        Ground { chunk: at },
+                        Mesh3d(self.meshes.add(mesh)),
+                        MeshMaterial3d(self.mud.0.clone()),
+                        transform,
+                    ))
+                    .id(),
+            );
+        }
+        entities
+    }
+}
+
+fn spawn_ground(mut commands: Commands, grid: Res<Grid>, mut assets: GroundAssets) {
+    for (at, _) in grid.chunks() {
+        assets.spawn(&mut commands, &grid, at);
+    }
+}
+
+/// Redraws the ground around every chunk that was claimed or taken back (rock heights and mud
+/// lips depend on the cells next door). A claimed chunk drops in, and one taken back sinks away.
+fn follow_chunks(
+    mut commands: Commands,
+    mut changes: MessageReader<ChunkChanged>,
+    grid: Res<Grid>,
+    ground: Query<(Entity, &Ground, &Transform)>,
+    mut assets: GroundAssets,
+) {
+    let changes: Vec<ChunkChanged> = changes.read().copied().collect();
+    if changes.is_empty() {
+        return;
+    }
+    let mut redraw: Vec<IVec2> = Vec::new();
+    for change in &changes {
+        for y in -1..=1 {
+            for x in -1..=1 {
+                let at = change.at + IVec2::new(x, y);
+                if !redraw.contains(&at) {
+                    redraw.push(at);
+                }
+            }
+        }
+    }
+    let claimed = |at: IVec2| {
+        changes
+            .iter()
+            .rev()
+            .find(|change| change.at == at)
+            .map(|change| change.claimed)
+    };
+    for (entity, view, transform) in &ground {
+        if !redraw.contains(&view.chunk) {
+            continue;
+        }
+        if claimed(view.chunk) == Some(false) {
+            let from = transform.translation;
+            commands.entity(entity).insert(
+                Tween::new(
+                    TweenTarget::Translation {
+                        from,
+                        to: from - Vec3::Y * CHUNK_SINK_DEPTH,
+                    },
+                    EaseFunction::QuadraticIn,
+                    0.0,
+                    CHUNK_SINK_SECONDS,
+                )
+                .then_despawn(),
+            );
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+    for at in redraw {
+        if grid.chunk(at).is_none() {
+            continue;
+        }
+        let entities = assets.spawn(&mut commands, &grid, at);
+        if claimed(at) == Some(true) {
+            let origin = Grid::chunk_origin(at);
+            let to = Vec3::new(origin.x as f32, 0.0, origin.y as f32);
+            let drop = Tween::new(
+                TweenTarget::Translation {
+                    from: to + Vec3::Y * CHUNK_DROP_HEIGHT,
+                    to,
+                },
+                EaseFunction::QuadraticIn,
+                0.0,
+                CHUNK_DROP_SECONDS,
+            );
+            for (index, entity) in entities.into_iter().enumerate() {
+                let mut entity = commands.entity(entity);
+                entity.insert((drop.clone(), drop.start_transform()));
+                if index == 0 {
+                    entity.insert(Landing);
+                }
+            }
         }
     }
 }
 
+/// A claimed chunk hits the map: dust all along its edges and a big shake.
+fn land_chunk(
+    done: On<TweenDone>,
+    mut commands: Commands,
+    landing: Query<&Ground, With<Landing>>,
+    mut particles: Particles,
+    mut shake: ResMut<Shake>,
+) {
+    let Ok(ground) = landing.get(done.entity) else {
+        return;
+    };
+    commands.entity(done.entity).remove::<Landing>();
+    shake.add(CHUNK_LAND_SHAKE);
+    let origin = Grid::chunk_origin(ground.chunk).as_vec2();
+    let size = CHUNK_SIZE as f32;
+    let corners = [
+        origin,
+        origin + Vec2::new(size, 0.0),
+        origin + Vec2::splat(size),
+        origin + Vec2::new(0.0, size),
+    ];
+    for side in 0..4 {
+        let (from, to) = (corners[side], corners[(side + 1) % 4]);
+        for step in 0..CHUNK_DUST_PER_SIDE {
+            let at = from.lerp(to, (step as f32 + 0.5) / CHUNK_DUST_PER_SIDE as f32);
+            particles.burst(
+                &mut commands,
+                Vec3::new(at.x, 0.05, at.y),
+                0.8,
+                Burst {
+                    colors: &palette::DUST,
+                    count: 5,
+                    size: DUST_SIZE * 1.6,
+                    spread: DUST_SPREAD,
+                    lift: DUST_LIFT,
+                    lifetime: DUST_LIFETIME * 1.4,
+                },
+            );
+        }
+    }
+}
+
+/// A new run starts on the starting map: every claimed chunk is taken off, with its nest. (What
+/// was built on them is cleared first, like everything else built.)
+fn back_to_the_starting_map(mut grid: ResMut<Grid>, mut changed: MessageWriter<ChunkChanged>) {
+    let (start, _) = starting_map();
+    let claimed: Vec<IVec2> = grid
+        .chunks()
+        .map(|(at, _)| at)
+        .filter(|&at| start.chunk(at).is_none())
+        .collect();
+    for at in claimed {
+        grid.remove_chunk(at);
+        changed.write(ChunkChanged { at, claimed: false });
+    }
+    grid.nests = start.nests;
+}
+
 /// A chunk's ground in chunk-local coordinates: a slab showing through as grid lines, a tile per
 /// cell, and rock blocks. Mud is drawn separately ([`mud_mesh`]), since it's glossy.
-fn chunk_mesh(grid: &Grid, at: IVec2) -> Mesh {
+pub fn chunk_mesh(grid: &Grid, at: IVec2) -> Mesh {
     let size = CHUNK_SIZE as f32;
     let origin = Grid::chunk_origin(at);
     let mut mesh = BoxMesh::default();
@@ -340,7 +550,7 @@ fn chunk_mesh(grid: &Grid, at: IVec2) -> Mesh {
 /// A chunk's mud in chunk-local coordinates, if it has any: a sheet over each mud cell (covering
 /// the gaps between cells, so a patch reads as one), a lip of drier mud along the edges that
 /// meet other ground, and puddles.
-fn mud_mesh(grid: &Grid, at: IVec2) -> Option<Mesh> {
+pub fn mud_mesh(grid: &Grid, at: IVec2) -> Option<Mesh> {
     let origin = Grid::chunk_origin(at);
     let is_mud = |cell: IVec2| {
         grid.cell(cell)
@@ -412,9 +622,9 @@ mod tests {
         for cell in landmarks.command_center.cells() {
             assert_eq!(grid.structure(cell), Some(Structure::CommandCenter));
         }
-        assert_eq!(landmarks.nests.len(), 1);
+        assert_eq!(grid.nests.len(), 1);
         let fields = FlowFields::new(&grid, &landmarks);
-        for &nest in &landmarks.nests {
+        for &nest in &grid.nests {
             assert!(on_map(nest));
             for cell in nest.cells() {
                 assert_eq!(grid.cell(cell).unwrap().terrain, Terrain::Nest);
@@ -443,7 +653,7 @@ mod tests {
             }
         );
         assert_eq!(
-            landmarks.nests,
+            grid.nests,
             vec![Footprint {
                 min: IVec2::new(-2, -2),
                 size: 2
@@ -494,8 +704,8 @@ mod tests {
     }
 
     /// Where a route from the nest crosses the ridge (its first cell at y = -6).
-    fn crossing(field: &FlowField, landmarks: &Landmarks) -> IVec2 {
-        let start = field.node_at(landmarks.nests[0].center().xz());
+    fn crossing(field: &FlowField, grid: &Grid) -> IVec2 {
+        let start = field.node_at(grid.nests[0].center().xz());
         *field
             .route(start)
             .iter()
@@ -515,7 +725,7 @@ mod tests {
         let swarmers =
             |grid: &Grid| FlowField::new(grid, Class::Swarmer, landmarks.command_center.cells());
         // Open: straight through the narrow gate.
-        assert_eq!(crossing(&swarmers(&grid), &landmarks), a[0]);
+        assert_eq!(crossing(&swarmers(&grid), &grid), a[0]);
         let wall = |grid: &mut Grid, cells: &[IVec2]| {
             for &cell in cells {
                 grid.set_structure(cell, Some(Structure::WALL));
@@ -523,14 +733,14 @@ mod tests {
         };
         // Walled: through the mud.
         wall(&mut grid, &a);
-        assert!((-12..=-10).contains(&crossing(&swarmers(&grid), &landmarks).x));
+        assert!((-12..=-10).contains(&crossing(&swarmers(&grid), &grid).x));
         // The mud sealed off too: the long way round, through the east gate.
         wall(&mut grid, &b);
-        assert!((9..=10).contains(&crossing(&swarmers(&grid), &landmarks).x));
+        assert!((9..=10).contains(&crossing(&swarmers(&grid), &grid).x));
         // All three: it breaks through, at the narrow gate.
         wall(&mut grid, &c);
         let field = swarmers(&grid);
-        let start = field.node_at(landmarks.nests[0].center().xz());
+        let start = field.node_at(grid.nests[0].center().xz());
         assert_eq!(field.breaches(start, &grid), a);
     }
 
@@ -538,7 +748,7 @@ mod tests {
     fn brutes_never_take_the_narrow_gate() {
         let (grid, landmarks) = starting_map();
         let brutes = FlowField::new(&grid, Class::Brute, landmarks.command_center.cells());
-        let x = crossing(&brutes, &landmarks).x;
+        let x = crossing(&brutes, &grid).x;
         assert!(
             (-12..=-11).contains(&x) || x == 9,
             "brutes cross the ridge at {x}"

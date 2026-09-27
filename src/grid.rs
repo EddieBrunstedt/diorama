@@ -245,6 +245,15 @@ impl Chunk {
     fn get_mut(&mut self, local: IVec2) -> &mut Cell {
         &mut self.cells[Self::index(local)]
     }
+
+    pub fn set_terrain(&mut self, local: IVec2, terrain: Terrain) {
+        self.get_mut(local).terrain = terrain;
+    }
+
+    /// Whether nothing stands on any of its cells.
+    pub fn is_bare(&self) -> bool {
+        self.cells.iter().all(|cell| cell.structure.is_none())
+    }
 }
 
 /// Why a structure can't go on a cell.
@@ -325,6 +334,9 @@ impl CommandCenterHp {
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub struct Grid {
     chunks: HashMap<IVec2, Chunk>,
+    /// Where the horde comes out, in the order they were added (the starting map's first, then
+    /// one per claimed chunk that holds a nest). Their cells are [`Terrain::Nest`].
+    pub nests: Vec<Footprint>,
     /// The Command Center's HP, for the whole building (it stands on several cells). It's kept
     /// with the map so that repairing it is an edit like any other, and can be undone (see
     /// [`crate::build::history`]).
@@ -350,6 +362,15 @@ impl Grid {
     /// Adds a chunk, replacing any chunk already there.
     pub fn insert_chunk(&mut self, at: IVec2, chunk: Chunk) {
         self.chunks.insert(at, chunk);
+    }
+
+    /// Takes a chunk off the map. Returns it, if there was one.
+    pub fn remove_chunk(&mut self, at: IVec2) -> Option<Chunk> {
+        self.chunks.remove(&at)
+    }
+
+    pub fn chunk(&self, at: IVec2) -> Option<&Chunk> {
+        self.chunks.get(&at)
     }
 
     pub fn chunks(&self) -> impl Iterator<Item = (IVec2, &Chunk)> {

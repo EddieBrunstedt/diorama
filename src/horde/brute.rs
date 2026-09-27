@@ -9,6 +9,7 @@ use super::crowd::{CrowdIndex, push_out, separation, steer, touches, walls_in_th
 use super::{Health, HordeRng, MAX_STEP, SwarmersEmerged, Toughness, facing};
 use crate::command_center::CommandCenterHit;
 use crate::flow::{Class, FlowFields};
+use crate::grid::Grid;
 use crate::juice::{Burst, Particles, Shake, Squash};
 use crate::map::Landmarks;
 use crate::palette;
@@ -43,6 +44,8 @@ pub struct BruteQueue {
     pub waiting: u32,
     /// Seconds until the next one comes out.
     next: f32,
+    /// How many have come out this wave: the nests take turns.
+    pub(super) turn: usize,
 }
 
 impl BruteQueue {
@@ -199,7 +202,7 @@ fn brute_mesh() -> Mesh {
 pub(super) fn spawn_brutes(
     mut commands: Commands,
     time: Res<Time>,
-    landmarks: Res<Landmarks>,
+    grid: Res<Grid>,
     assets: Res<BruteAssets>,
     material: Res<ShapeMaterial>,
     toughness: Res<Toughness>,
@@ -207,7 +210,7 @@ pub(super) fn spawn_brutes(
     mut rng: ResMut<HordeRng>,
     mut emerged: MessageWriter<SwarmersEmerged>,
 ) {
-    if queue.waiting == 0 {
+    if queue.waiting == 0 || grid.nests.is_empty() {
         queue.next = 0.0;
         return;
     }
@@ -218,9 +221,9 @@ pub(super) fn spawn_brutes(
     queue.next = BRUTE_SPAWN_INTERVAL;
     queue.waiting -= 1;
     let rng = &mut rng.0;
-    let nest = rng.index(landmarks.nests.len());
-    let at =
-        landmarks.nests[nest].center().xz() + Vec2::new(rng.range(-0.2, 0.2), rng.range(-0.2, 0.2));
+    let nest = queue.turn % grid.nests.len();
+    queue.turn += 1;
+    let at = grid.nests[nest].center().xz() + Vec2::new(rng.range(-0.2, 0.2), rng.range(-0.2, 0.2));
     let fallback = Vec2::from_angle(rng.range(0.0, std::f32::consts::TAU));
     commands.spawn((
         Brute {

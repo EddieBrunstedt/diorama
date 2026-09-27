@@ -3,17 +3,18 @@
 //! - Bottom-right, the wave box. In the build phase it previews the next wave (its counts, packs
 //!   and how much tougher it is) above a "Start wave" button; in the wave phase it shows how far
 //!   the wave has come, above the speed button.
-//! - A label on the map by each nest that will spawn, with what's coming out of it (build phase).
+//! - A label on the map by each nest, with what's coming out of it (build phase).
 //! - A banner when a wave is cleared.
 //! - The game-over screen: waves survived, the best run this session, and a Restart button.
 
 use super::FONT_SIZE;
 use crate::camera::MainCamera;
+use crate::chunks::ChunkOffer;
+use crate::grid::Grid;
 use crate::horde::{BruteQueue, Health, SpawnQueue};
-use crate::map::Landmarks;
 use crate::palette;
 use crate::tuning::juice::{GAME_OVER_DELAY, WAVE_BANNER_SECONDS};
-use crate::waves::plan::{Run, Wave};
+use crate::waves::plan::{Run, Wave, nest_share};
 use crate::waves::{ActiveWave, CurrentWave, FlowButton, GameSpeed, Phase, WaveCleared};
 use bevy::prelude::*;
 
@@ -29,27 +30,19 @@ pub struct WaveHudPlugin;
 
 impl Plugin for WaveHudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Startup,
-            (
-                spawn_wave_box,
-                spawn_nest_labels,
-                spawn_banner,
-                spawn_game_over,
-            ),
-        )
-        .add_systems(PreUpdate, press_buttons.after(bevy::ui::UiSystems::Focus))
-        .add_systems(OnEnter(Phase::GameOver), reset_game_over)
-        .add_systems(
-            Update,
-            (
-                show_wave_box,
-                show_nest_labels,
-                show_banner,
-                show_game_over,
-                hover_buttons,
-            ),
-        );
+        app.add_systems(Startup, (spawn_wave_box, spawn_banner, spawn_game_over))
+            .add_systems(PreUpdate, press_buttons.after(bevy::ui::UiSystems::Focus))
+            .add_systems(OnEnter(Phase::GameOver), reset_game_over)
+            .add_systems(
+                Update,
+                (
+                    show_wave_box,
+                    (spawn_nest_labels, show_nest_labels).chain(),
+                    show_banner,
+                    show_game_over,
+                    hover_buttons,
+                ),
+            );
     }
 }
 
@@ -141,30 +134,37 @@ fn counts(swarmers: u32, brutes: u32) -> String {
     }
 }
 
-/// What the wave box says about a wave that hasn't started yet.
-fn preview(wave: &Wave) -> [String; 4] {
+/// What the wave box says about a wave that hasn't started yet, coming out of `nests` nests.
+fn preview(wave: &Wave, nests: usize, claim_first: bool) -> [String; 4] {
     let title = if wave.heavy {
         format!("Wave {}  (heavy)", wave.number)
     } else {
         format!("Wave {}", wave.number)
     };
     let tougher = ((wave.toughness - 1.0) * 100.0).round() as i32;
-    let details = if tougher > 0 {
-        format!("{} packs, enemy HP +{tougher}%", wave.packs)
+    let packs = if nests > 1 {
+        format!("{} packs from {nests} nests", wave.packs)
     } else {
         format!("{} packs", wave.packs)
     };
-    [
-        title,
-        counts(wave.swarmers, wave.brutes),
-        details,
-        format!("Start wave {}  (Space)", wave.number),
-    ]
+    let details = if tougher > 0 {
+        format!("{packs}, enemy HP +{tougher}%")
+    } else {
+        packs
+    };
+    let button = if claim_first {
+        "Claim new ground first".to_string()
+    } else {
+        format!("Start wave {}  (Space)", wave.number)
+    };
+    [title, counts(wave.swarmers, wave.brutes), details, button]
 }
 
 fn show_wave_box(
     phase: Res<State<Phase>>,
     wave: Res<CurrentWave>,
+    grid: Res<Grid>,
+    offer: Res<ChunkOffer>,
     active: Res<ActiveWave>,
     speed: Res<GameSpeed>,
     swarmers: Res<SpawnQueue>,
@@ -173,8 +173,9 @@ fn show_wave_box(
     mut wave_box: Single<&mut Visibility, With<WaveBox>>,
     mut texts: Query<(&WaveText, &mut Text, &mut TextColor)>,
 ) {
+    let claim_first = *phase.get() == Phase::Build && offer.pending(&grid);
     let lines = match phase.get() {
-        Phase::Build => preview(&wave.0),
+        Phase::Build => preview(&wave.0, grid.nests.len(), claim_first),
         Phase::Wave => {
             let (released, packs) = active.0.progress();
             let left = enemies.iter().len() as u32 + swarmers.waiting + brutes.waiting;
@@ -207,6 +208,10 @@ fn show_wave_box(
             } else {
                 palette::BANNER_TEXT
             }));
+        }
+        if *line == WaveText::Button {
+            let alpha = if claim_first { 0.45 } else { 1.0 };
+            color.set_if_neq(TextColor(palette::BANNER_TEXT.with_alpha(alpha)));
         }
     }
 }
@@ -251,8 +256,15 @@ fn hover_buttons(
 #[derive(Component)]
 struct NestLabel(usize);
 
-fn spawn_nest_labels(mut commands: Commands, landmarks: Res<Landmarks>) {
-    for index in 0..landmarks.nests.len() {
+/// Keeps a label for every nest, as nests come and go with claimed chunks.
+fn spawn_nest_labels(mut commands: Commands, grid: Res<Grid>, labels: Query<(Entity, &NestLabel)>) {
+    let nests = grid.nests.len();
+    for (entity, label) in &labels {
+        if label.0 >= nests {
+            commands.entity(entity).despawn();
+        }
+    }
+    for index in labels.iter().len()..nests {
         commands.spawn((
             NestLabel(index),
             Node {
@@ -272,7 +284,7 @@ fn show_nest_labels(
     time: Res<Time<Real>>,
     phase: Res<State<Phase>>,
     wave: Res<CurrentWave>,
-    landmarks: Res<Landmarks>,
+    grid: Res<Grid>,
     camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
     mut labels: Query<(
         &NestLabel,
@@ -284,9 +296,9 @@ fn show_nest_labels(
     )>,
 ) {
     let (camera, transform) = *camera;
-    let nests = landmarks.nests.len().max(1) as u32;
+    let nests = grid.nests.len();
     for (label, mut node, mut text, mut color, mut visibility, computed) in &mut labels {
-        let Some(nest) = landmarks.nests.get(label.0) else {
+        let Some(nest) = grid.nests.get(label.0) else {
             continue;
         };
         // Beside the nest, clear of the path preview's arrows coming out of it.
@@ -299,10 +311,13 @@ fn show_nest_labels(
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
-        // The swarmers pick a nest at random each, so each nest gets about its share.
+        // The nests take turns, so each gets its exact share.
         let value = format!(
             "{} coming",
-            counts(wave.0.swarmers / nests, wave.0.brutes / nests)
+            counts(
+                nest_share(wave.0.swarmers, nests, label.0),
+                nest_share(wave.0.brutes, nests, label.0)
+            )
         );
         if text.0 != value {
             text.0 = value;
@@ -503,7 +518,7 @@ mod tests {
     #[test]
     fn previews_read_well() {
         assert_eq!(
-            preview(&wave(1)),
+            preview(&wave(1), 1, false),
             [
                 "Wave 1".to_string(),
                 "100 swarmers".to_string(),
@@ -511,10 +526,13 @@ mod tests {
                 "Start wave 1  (Space)".to_string(),
             ]
         );
-        let heavy = preview(&wave(5));
+        let heavy = preview(&wave(5), 1, false);
         assert_eq!(heavy[0], "Wave 5  (heavy)");
         assert_eq!(heavy[1], "120 swarmers, 2 brutes");
         assert_eq!(heavy[2], "3 packs, enemy HP +24%");
+        let fronts = preview(&wave(5), 3, true);
+        assert_eq!(fronts[2], "3 packs from 3 nests, enemy HP +24%");
+        assert_eq!(fronts[3], "Claim new ground first");
         assert_eq!(counts(0, 1), "1 brute");
     }
 }

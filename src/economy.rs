@@ -8,7 +8,8 @@
 //! Income doesn't grow with the size of the horde: a wave's swarmers share a purse ([`Purse`]),
 //! so each is worth less as their numbers grow. Brutes pay a fixed bounty, and clearing a wave
 //! pays a bonus ([`wave_bonus`], paid by [`crate::waves`]). Both purse and bonus grow a little
-//! with every wave.
+//! with every wave. Claiming a chunk with a nest in it pays a bounty ([`nest_bounty`], see
+//! [`crate::chunks`]).
 
 use crate::flow::Class;
 use crate::grid::{Change, CommandCenterHp, Kind, Structure};
@@ -143,6 +144,11 @@ pub fn swarm_purse(number: u32) -> f64 {
 /// What clearing wave `number` pays.
 pub fn wave_bonus(number: u32) -> u32 {
     WAVE_BONUS + WAVE_BONUS_PER_WAVE * number.saturating_sub(1)
+}
+
+/// What claiming a chunk with a nest pays, after wave `number` was cleared.
+pub fn nest_bounty(number: u32) -> u32 {
+    NEST_BOUNTY + NEST_BOUNTY_PER_WAVE * number.saturating_sub(1)
 }
 
 /// What building one costs.
@@ -388,6 +394,8 @@ mod tests {
         assert_eq!(wave_bonus(1), WAVE_BONUS);
         assert_eq!(swarm_purse(20), SWARM_PURSE + 19.0 * SWARM_PURSE_PER_WAVE);
         assert_eq!(wave_bonus(20), WAVE_BONUS + 19 * WAVE_BONUS_PER_WAVE);
+        assert_eq!(nest_bounty(1), NEST_BOUNTY);
+        assert_eq!(nest_bounty(5), NEST_BOUNTY + 4 * NEST_BOUNTY_PER_WAVE);
     }
 
     #[test]

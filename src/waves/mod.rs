@@ -1,8 +1,10 @@
 //! The wave loop, as Bevy states ([`Phase`]):
 //!
-//! - **Build**: no timer. Everything built, sold or repaired can be undone until the wave starts
-//!   (Space, or the Start button). The HUD previews the wave: its counts, packs and toughness.
-//! - **Wave**: no building. The wave comes out of the nests in packs ([`plan`]), and Tab cycles
+//! - **Build**: no timer. After a wave, a chunk has to be claimed first ([`crate::chunks`]).
+//!   Everything built, sold, repaired or claimed can be undone until the wave starts (Space, or
+//!   the Start button). The HUD previews the wave: its counts, packs and toughness, and what
+//!   comes out of each nest.
+//! - **Wave**: no building. The wave comes out of every nest in packs ([`plan`]), and Tab cycles
 //!   the game speed (1×/2×/3×). It ends when every enemy is dead: the bonus is paid, and it's
 //!   back to building for the next one.
 //! - **GameOver**: the Command Center fell. The horde swarms over its ruin until R (or the
@@ -15,12 +17,12 @@
 
 pub mod plan;
 
+use crate::chunks::ChunkOffer;
 use crate::command_center::CommandCenterFell;
 use crate::economy::{EconomySystems, Wallet, wave_bonus};
 use crate::grid::Grid;
 use crate::horde::{BruteQueue, DeathSystems, Health, SpawnQueue};
 use crate::juice::{HitStop, Shake, TimeScale};
-use crate::map::Landmarks;
 use crate::tuning::juice::{WAVE_CLEAR_HIT_STOP, WAVE_CLEAR_SHAKE};
 use crate::tuning::waves::{PACK_SECONDS, SPEEDS};
 use bevy::prelude::*;
@@ -142,14 +144,16 @@ fn start_run(mut commands: Commands, settings: Res<WaveSettings>) {
 fn start_wave(
     keys: Res<ButtonInput<KeyCode>>,
     mut buttons: MessageReader<FlowButton>,
-    landmarks: Res<Landmarks>,
+    grid: Res<Grid>,
+    offer: Res<ChunkOffer>,
     mut next: ResMut<NextState<Phase>>,
 ) {
     let clicked = buttons
         .read()
         .any(|&button| button == FlowButton::StartWave);
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    if (clicked || (keys.just_pressed(KeyCode::Space) && !ctrl)) && !landmarks.nests.is_empty() {
+    let ready = !grid.nests.is_empty() && !offer.pending(&grid);
+    if (clicked || (keys.just_pressed(KeyCode::Space) && !ctrl)) && ready {
         next.set(Phase::Wave);
     }
 }

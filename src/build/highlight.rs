@@ -112,8 +112,10 @@ fn wanted(
     wallet: Wallet,
 ) -> Vec<(IVec2, Look)> {
     match &active.0 {
+        // Off the map there's nothing to highlight (a chunk offered there shows itself).
         None => pointer
             .cell
+            .filter(|&cell| grid.cell(cell).is_some())
             .map(|cell| {
                 let look = match grid.check_build(cell) {
                     Ok(()) if wallet.money() >= price(tool.0) => Look::Build,

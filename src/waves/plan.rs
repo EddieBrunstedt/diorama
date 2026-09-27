@@ -98,6 +98,17 @@ pub fn packs(wave: &Wave) -> Vec<Pack> {
         .collect()
 }
 
+/// How many of `total` come out of nest `index` of `nests`: the nests take turns, from the
+/// first, so the earlier nests get one more when it doesn't split evenly.
+pub fn nest_share(total: u32, nests: usize, index: usize) -> u32 {
+    let nests = nests.max(1) as u32;
+    let index = index as u32;
+    if index >= nests {
+        return 0;
+    }
+    (total + nests - 1 - index) / nests
+}
+
 /// Part `index` of `total` split into `parts` nearly equal parts that add up to it.
 fn share(total: u32, parts: u32, index: u32) -> u32 {
     let (total, parts, index) = (total as u64, parts as u64, index as u64);
@@ -243,6 +254,21 @@ mod tests {
         assert_eq!(wave(1).toughness, 1.0);
         assert_eq!(wave(1).packs, 2);
         assert_eq!(wave(20).packs, 7);
+    }
+
+    #[test]
+    fn nests_take_turns() {
+        for nests in 1..5 {
+            for total in [0, 1, 7, 100, 333] {
+                let mut counts = vec![0; nests];
+                for turn in 0..total as usize {
+                    counts[turn % nests] += 1;
+                }
+                let shares: Vec<u32> = (0..nests).map(|i| nest_share(total, nests, i)).collect();
+                assert_eq!(shares, counts, "{total} over {nests}");
+            }
+        }
+        assert_eq!(nest_share(10, 2, 5), 0, "no such nest");
     }
 
     #[test]

@@ -8,6 +8,9 @@
 //! middle goes where the block's middle is). A 1-cell gap has no block that fits through it
 //! without a wall or rock in it, so brutes can't squeeze through: they break a wall beside it.
 //!
+//! The fields cover the rectangle around the whole map, which grows as chunks are claimed; cells
+//! inside it that aren't on the map count as impassable.
+//!
 //! Walls and towers are passable at a cost based on the HP they have left: when a maze makes the
 //! detour longer than chewing through, the field leads through them. Terrain costs the time it
 //! takes to cross: mud slows the horde down, so it costs more than open ground, by class.
@@ -22,7 +25,7 @@
 
 use crate::build::{BuildSystems, StructureChanged};
 use crate::grid::{Cell, Grid, Structure, Terrain};
-use crate::map::Landmarks;
+use crate::map::{ChunkChanged, Landmarks};
 use crate::tuning::flow::{BRUTE_COST_PER_HP, SWARMER_COST_PER_HP, WEAR_REBUILD_INTERVAL};
 use crate::tuning::horde::BRUTE_RADIUS;
 use crate::tuning::terrain::{BRUTE_MUD_SPEED, SWARMER_MUD_SPEED};
@@ -60,13 +63,14 @@ struct Rebuilds {
 fn update_fields(
     time: Res<Time>,
     mut changes: MessageReader<StructureChanged>,
+    mut chunks: MessageReader<ChunkChanged>,
     mut damaged: MessageReader<StructureDamaged>,
     grid: Res<Grid>,
     landmarks: Res<Landmarks>,
     mut fields: ResMut<FlowFields>,
     mut rebuilds: Local<Rebuilds>,
 ) {
-    let changed = changes.read().count() > 0;
+    let changed = changes.read().count() + chunks.read().count() > 0;
     rebuilds.worn |= damaged.read().count() > 0;
     let now = time.elapsed_secs();
     if changed || (rebuilds.worn && now - rebuilds.last >= WEAR_REBUILD_INTERVAL) {

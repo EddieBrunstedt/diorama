@@ -161,14 +161,13 @@ fn trace_routes(
     time: Res<Time<Real>>,
     fields: Res<FlowFields>,
     grid: Res<Grid>,
-    landmarks: Res<Landmarks>,
     mut routes: ResMut<Routes>,
 ) {
     let mut lines = Vec::new();
     let mut breaches: Vec<Breach> = Vec::new();
     for (index, &class) in CLASSES.iter().enumerate() {
         let field = fields.get(class);
-        for nest in &landmarks.nests {
+        for nest in &grid.nests {
             let start = nest.center().xz();
             let from = field.node_at(start);
             let mut points = vec![start];
