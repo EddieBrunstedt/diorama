@@ -2,10 +2,12 @@
 //!
 //! The queue, the wood plan, walking paths, route planning and timing are plain data in [`queue`],
 //! [`nav`], [`route`] and [`timeline`]. The rest is the ECS side: clicking to give orders, carrying
-//! them out, animation and showing the planned route on the island.
+//! them out, getting in and out of the catapult ([`manning`]), animation and showing the planned
+//! route on the island.
 
 mod anim;
 mod input;
+mod manning;
 mod model;
 pub mod nav;
 pub mod queue;
@@ -15,14 +17,16 @@ pub mod timeline;
 mod work;
 
 pub use anim::shown_wood;
-pub use input::{Aim, cursor_position};
-pub use queue::{Backpack, OrderId, OrderKind, OrderQueue, Problem};
+pub use input::{Aim, BuildChoice, ChooseBuilding, cursor_position};
+pub use queue::{Backpack, Building, OrderId, OrderKind, OrderQueue, Phase, Problem};
 pub use route::PlannedOrder;
 pub use timeline::Slot;
 
+use crate::catapult::Catapult;
 use crate::island::{Island, Tree, TreeId};
 use crate::juice::{Squash, Tween};
 use crate::phase::{GameState, PrepareClock, building_allowed, keeper_working, wave_deadline};
+use crate::slimes::WaveRun;
 use crate::towers::{BuildSite, Tower};
 use crate::voxel::{VOXEL, VoxelMaterial};
 use bevy::prelude::*;
@@ -51,6 +55,8 @@ impl Plugin for KeeperPlugin {
             .init_resource::<Timeline>()
             .init_resource::<AimPreview>()
             .init_resource::<Aim>()
+            .init_resource::<BuildChoice>()
+            .add_message::<ChooseBuilding>()
             .init_resource::<VoxelMaterial>()
             .init_resource::<KeeperAssets>()
             .add_systems(Startup, input::spawn_aim_marker)
@@ -59,8 +65,14 @@ impl Plugin for KeeperPlugin {
             .add_systems(
                 Update,
                 (
-                    (input::aim, input::give_orders.run_if(working)).chain(),
+                    (
+                        input::choose_building,
+                        input::aim,
+                        input::give_orders.run_if(working),
+                    )
+                        .chain(),
                     update_nav,
+                    manning::work_catapult_seat.run_if(working),
                     work::carry_out_orders.run_if(working),
                     update_plan,
                     update_timeline,
@@ -89,6 +101,18 @@ impl Plugin for KeeperPlugin {
 /// picked, and not after game over).
 pub fn working(state: Res<State<GameState>>) -> bool {
     keeper_working(*state.get())
+}
+
+/// Which phase orders are planned for: getting ready for the next wave (which is also what the
+/// tile offer plans for), the wave, or the moment after its last slime (`cleared`) is gone.
+pub fn plan_phase(state: GameState, cleared: bool) -> Phase {
+    if building_allowed(state) {
+        Phase::Preparing
+    } else if cleared {
+        Phase::WaveOver
+    } else {
+        Phase::Wave
+    }
 }
 
 /// Everything that changes the queue and the plan. Systems that show them run after this.
@@ -126,21 +150,38 @@ pub enum Task {
         swing: f32,
         site: Option<Entity>,
     },
+    /// In the catapult (or hopping in: `board` goes from 0 to 1), until called out.
+    Manning {
+        order: OrderId,
+        catapult: Entity,
+        /// Where he stood to get in, and gets out to.
+        stand: Vec2,
+        board: f32,
+    },
+    /// Hopping out of the catapult, back to where he got in.
+    Leaving { from: Vec3, to: Vec2, t: f32 },
 }
 
 impl Task {
     fn order(&self) -> Option<OrderId> {
         match self {
-            Task::Idle => None,
-            Task::Walking { order, .. } | Task::Working { order, .. } => Some(*order),
+            Task::Idle | Task::Leaving { .. } => None,
+            Task::Walking { order, .. }
+            | Task::Working { order, .. }
+            | Task::Manning { order, .. } => Some(*order),
         }
     }
 
     fn site(&self) -> Option<Entity> {
         match self {
-            Task::Idle => None,
             Task::Walking { site, .. } | Task::Working { site, .. } => *site,
+            _ => None,
         }
+    }
+
+    /// In the catapult, or getting in or out of it: he's not on his own feet.
+    pub fn in_catapult(&self) -> bool {
+        matches!(self, Task::Manning { .. } | Task::Leaving { .. })
     }
 
     /// How far along the current chop or build is, from 0 to 1.
@@ -154,10 +195,11 @@ impl Task {
     }
 
     /// Seconds until the order in progress (of this `kind`) is done: the rest of the walk and all
-    /// of the work, or what's left of the work.
+    /// of the work, or what's left of the work. (Manning the catapult never is: see
+    /// [`timeline::schedule`].)
     pub fn seconds_left(&self, position: Vec2, kind: &OrderKind) -> f32 {
         match self {
-            Task::Idle => 0.0,
+            Task::Idle | Task::Manning { .. } | Task::Leaving { .. } => 0.0,
             Task::Walking { .. } => {
                 route::walk_seconds(&self.remaining_path(position)) + kind.work_seconds()
             }
@@ -243,8 +285,8 @@ impl TreeLookup for TreeIndex {
 #[derive(Resource, Default)]
 pub struct Plan {
     pub orders: Vec<PlannedOrder>,
-    /// What the plan was made for: the keeper's progress, and whether building was allowed.
-    planned_for: Option<(Progress, bool)>,
+    /// What the plan was made for: the keeper's progress, and the phase.
+    planned_for: Option<(Progress, Phase)>,
 }
 
 impl Plan {
@@ -383,6 +425,7 @@ fn update_nav(
     trees: Query<&Tree>,
     sites: Query<&BuildSite>,
     towers: Query<&Tower>,
+    catapults: Query<&Catapult>,
     mut nav: ResMut<NavGrid>,
     mut index: ResMut<TreeIndex>,
 ) {
@@ -396,6 +439,7 @@ fn update_nav(
         .iter()
         .map(|site| site.cell)
         .chain(towers.iter().map(|tower| tower.cell))
+        .chain(catapults.iter().map(|catapult| catapult.cell))
     {
         grid.block_tower(cell);
     }
@@ -408,7 +452,7 @@ fn update_plan(
     backpack: Res<Backpack>,
     nav: Res<NavGrid>,
     trees: Res<TreeIndex>,
-    state: Res<State<GameState>>,
+    (state, run): (Res<State<GameState>>, Res<WaveRun>),
     keeper: Query<(&Keeper, &Transform)>,
     mut plan: ResMut<Plan>,
 ) {
@@ -417,15 +461,15 @@ fn update_plan(
     };
     let planned_for = (
         progress(keeper, transform, &queue),
-        building_allowed(*state.get()),
+        plan_phase(*state.get(), run.cleared()),
     );
     let changed =
         queue.is_changed() || backpack.is_changed() || nav.is_changed() || trees.is_changed();
     if !changed && plan.planned_for == Some(planned_for) {
         return;
     }
-    let (progress, building) = planned_for;
-    plan.orders = route::plan(queue.orders(), progress, &backpack, building, &nav, &*trees);
+    let (progress, phase) = planned_for;
+    plan.orders = route::plan(queue.orders(), progress, &backpack, phase, &nav, &*trees);
     plan.planned_for = Some(planned_for);
 }
 
@@ -437,6 +481,8 @@ fn progress(keeper: &Keeper, transform: &Transform, queue: &OrderQueue) -> Progr
             end: *path.last().unwrap_or(&position),
         },
         (Task::Working { .. }, Some(_)) => Progress::Started { end: position },
+        (Task::Manning { stand, .. }, Some(_)) => Progress::Started { end: *stand },
+        (Task::Leaving { to, .. }, _) => Progress::NotStarted { keeper: *to },
         _ => Progress::NotStarted { keeper: position },
     }
 }
@@ -478,7 +524,7 @@ fn preview_aim(
     backpack: Res<Backpack>,
     nav: Res<NavGrid>,
     trees: Res<TreeIndex>,
-    state: Res<State<GameState>>,
+    (state, run): (Res<State<GameState>>, Res<WaveRun>),
     keeper: Query<(&Keeper, &Transform)>,
     mut preview: ResMut<AimPreview>,
 ) {
@@ -503,7 +549,7 @@ fn preview_aim(
         &orders,
         progress(keeper, transform, &queue),
         &backpack,
-        building_allowed(*state.get()),
+        plan_phase(*state.get(), run.cleared()),
         &nav,
         &*trees,
     );
@@ -518,6 +564,14 @@ fn preview_aim(
 mod tests {
     use super::*;
     use crate::tuning::{CHOP_SECONDS, KEEPER_SPEED};
+
+    #[test]
+    fn orders_are_planned_for_the_phase_ahead() {
+        assert_eq!(plan_phase(GameState::Prepare, false), Phase::Preparing);
+        assert_eq!(plan_phase(GameState::TileOffer, true), Phase::Preparing);
+        assert_eq!(plan_phase(GameState::Wave, false), Phase::Wave);
+        assert_eq!(plan_phase(GameState::Wave, true), Phase::WaveOver);
+    }
 
     #[test]
     fn time_left_on_the_order_in_progress() {

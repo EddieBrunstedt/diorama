@@ -104,6 +104,11 @@ impl Health {
     /// An arrow hit. Returns whether that popped it.
     pub fn hit(&mut self, damage: u32) -> bool {
         self.incoming = self.incoming.saturating_sub(damage);
+        self.smash(damage)
+    }
+
+    /// Something no tower was counting on hit it (a boulder). Returns whether that popped it.
+    pub fn smash(&mut self, damage: u32) -> bool {
         self.hp = self.hp.saturating_sub(damage);
         self.hp == 0
     }
@@ -177,5 +182,14 @@ mod tests {
         assert!(health.doomed(), "one hit left and one arrow still coming");
         assert!(health.hit(1));
         assert_eq!(health.hp, 0);
+    }
+
+    #[test]
+    fn a_boulder_leaves_the_arrows_counted() {
+        let mut health = Health::new(4);
+        health.expect(1);
+        assert!(!health.smash(3));
+        assert!(health.doomed(), "the arrow on its way will finish it");
+        assert!(health.hit(1));
     }
 }

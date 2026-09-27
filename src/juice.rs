@@ -1,5 +1,5 @@
 //! Small in-house animation helpers: tweens with easing, squash & stretch springs, wobbles,
-//! particles, things flying to where they're counted, and screen shake.
+//! particles, things flying to where they're counted, screen shake and hit-stop.
 
 use crate::rng::Rng;
 use crate::voxel::{VoxelMaterial, VoxelMesh};
@@ -19,6 +19,10 @@ const PARTICLE_FLOOR: f32 = 0.0;
 /// Trauma lost per second, and the camera offset (world units) at full trauma.
 const SHAKE_DECAY: f32 = 1.6;
 const SHAKE_MAX_OFFSET: f32 = 0.12;
+/// How fast the game runs during a hit-stop, relative to normal: nearly frozen.
+const HIT_STOP_SPEED: f32 = 0.03;
+/// Longest hit-stop, however many hits pile up (real seconds).
+const MAX_HIT_STOP: f32 = 0.2;
 
 pub struct JuicePlugin;
 
@@ -27,6 +31,7 @@ impl Plugin for JuicePlugin {
         app.init_resource::<VoxelMaterial>()
             .init_resource::<CubeCache>()
             .init_resource::<Shake>()
+            .init_resource::<HitStop>()
             .insert_resource(ParticleRng(Rng::new(0x9A27)))
             .add_systems(
                 Update,
@@ -38,7 +43,8 @@ impl Plugin for JuicePlugin {
                     run_flights,
                     decay_shake,
                 ),
-            );
+            )
+            .add_systems(Last, run_hit_stop);
     }
 }
 
@@ -452,5 +458,32 @@ impl Shake {
 fn decay_shake(time: Res<Time>, mut shake: ResMut<Shake>) {
     if shake.trauma > 0.0 {
         shake.trauma = (shake.trauma - SHAKE_DECAY * time.delta_secs()).max(0.0);
+    }
+}
+
+/// Hit-stop: the game all but freezes for a moment on a big hit, so it lands with weight. Counted
+/// in real time, since game time is what it stops.
+#[derive(Resource, Default, Debug)]
+pub struct HitStop {
+    /// Real seconds left.
+    left: f32,
+    /// The game speed to go back to (the dev speed-up may have changed it).
+    speed: Option<f32>,
+}
+
+impl HitStop {
+    /// Freezes the game for `seconds` (real time), on top of any freeze still going.
+    pub fn add(&mut self, seconds: f32) {
+        self.left = (self.left + seconds).min(MAX_HIT_STOP);
+    }
+}
+
+fn run_hit_stop(real: Res<Time<Real>>, mut stop: ResMut<HitStop>, mut time: ResMut<Time<Virtual>>) {
+    if stop.left > 0.0 {
+        let speed = *stop.speed.get_or_insert(time.relative_speed());
+        time.set_relative_speed(speed * HIT_STOP_SPEED);
+        stop.left -= real.delta_secs();
+    } else if let Some(speed) = stop.speed.take() {
+        time.set_relative_speed(speed);
     }
 }

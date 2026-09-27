@@ -7,35 +7,86 @@
 //! and flagging orders that won't be possible when their turn comes. The keeper skips flagged orders
 //! when he gets to them, so the plan and what actually happens always agree.
 //!
-//! During a wave, builds can't be started. They stay queued (flagged [`Problem::WaveOn`]) and the
-//! keeper goes on with the orders behind them, so they come up first in the next prepare phase.
+//! Some orders belong to one phase and wait out the other (see [`OrderKind::hold`]): builds can't
+//! be started during a wave, and the catapult is only manned during one. A waiting order stays
+//! queued and the keeper goes on with the orders behind it, so it's first in line when its phase
+//! comes.
 
 use crate::island::TreeId;
 use crate::tuning::{
-    BACKPACK_CAPACITY, BUILD_SECONDS, CHOP_SECONDS, MAX_ORDERS, STARTING_WOOD, TOWER_WOOD_COST,
-    WOOD_PER_TREE,
+    BACKPACK_CAPACITY, BUILD_SECONDS, CATAPULT_BUILD_SECONDS, CATAPULT_WOOD_COST, CHOP_SECONDS,
+    MAX_ORDERS, REPAIR_SECONDS, STARTING_WOOD, TOWER_WOOD_COST, WOOD_PER_TREE,
 };
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OrderId(u32);
 
+/// What the keeper can build on a free meadow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Building {
+    /// Shoots slimes by itself.
+    #[default]
+    Tower,
+    /// Throws boulders, but only while the keeper mans it. One per island.
+    Catapult,
+}
+
+impl Building {
+    pub fn wood_cost(self) -> u32 {
+        match self {
+            Building::Tower => TOWER_WOOD_COST,
+            Building::Catapult => CATAPULT_WOOD_COST,
+        }
+    }
+
+    pub fn build_seconds(self) -> f32 {
+        match self {
+            Building::Tower => BUILD_SECONDS,
+            Building::Catapult => CATAPULT_BUILD_SECONDS,
+        }
+    }
+}
+
+/// Which part of the game the orders are planned for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Phase {
+    /// Getting ready for the next wave: builds can start, the catapult waits.
+    Preparing,
+    /// Slimes are coming: builds wait, the catapult can be manned.
+    Wave,
+    /// The wave's last slime is gone, but the next phase hasn't come yet: builds still wait, and
+    /// there's no getting into the catapult any more.
+    WaveOver,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OrderKind {
     Chop(TreeId),
-    /// Build a tower on this (meadow) cell.
-    Build(IVec2),
+    /// Build on this (meadow) cell.
+    Build(IVec2, Building),
+    /// Repair the tower on this cell.
+    Repair(IVec2),
+    /// Get into the catapult on this cell and work it until called out.
+    Man(IVec2),
     /// Walk to this point on the island (world x/z).
     Walk(Vec2),
 }
 
 impl OrderKind {
+    /// A tower build on `cell`.
+    pub fn tower(cell: IVec2) -> Self {
+        OrderKind::Build(cell, Building::Tower)
+    }
+
     /// Whether two orders are about the same thing, so the second one would be pointless.
     /// Walking somewhere twice is allowed.
     pub fn same_target(&self, other: &OrderKind) -> bool {
         match (self, other) {
             (OrderKind::Chop(a), OrderKind::Chop(b)) => a == b,
-            (OrderKind::Build(a), OrderKind::Build(b)) => a == b,
+            (OrderKind::Build(a, _), OrderKind::Build(b, _)) => a == b,
+            (OrderKind::Repair(a), OrderKind::Repair(b)) => a == b,
+            (OrderKind::Man(a), OrderKind::Man(b)) => a == b,
             _ => false,
         }
     }
@@ -44,23 +95,35 @@ impl OrderKind {
     pub fn wood_change(&self) -> i32 {
         match self {
             OrderKind::Chop(_) => WOOD_PER_TREE as i32,
-            OrderKind::Build(_) => -(TOWER_WOOD_COST as i32),
-            OrderKind::Walk(_) => 0,
+            OrderKind::Build(_, building) => -(building.wood_cost() as i32),
+            OrderKind::Repair(_) | OrderKind::Man(_) | OrderKind::Walk(_) => 0,
         }
     }
 
-    /// Seconds of work once the keeper has walked there.
+    /// Seconds of work once the keeper has walked there. Manning the catapult lasts until he's
+    /// called out (see [`Self::open_ended`]), so it has no set time.
     pub fn work_seconds(&self) -> f32 {
         match self {
             OrderKind::Chop(_) => CHOP_SECONDS,
-            OrderKind::Build(_) => BUILD_SECONDS,
-            OrderKind::Walk(_) => 0.0,
+            OrderKind::Build(_, building) => building.build_seconds(),
+            OrderKind::Repair(_) => REPAIR_SECONDS,
+            OrderKind::Man(_) | OrderKind::Walk(_) => 0.0,
         }
     }
 
-    /// Whether the order has to wait while a wave is on: no new builds during the wave.
-    pub fn waits_for_wave(&self) -> bool {
-        matches!(self, OrderKind::Build(_))
+    /// Lasts until the keeper is called out: the orders behind it wait until then.
+    pub fn open_ended(&self) -> bool {
+        matches!(self, OrderKind::Man(_))
+    }
+
+    /// Why the order has to wait in `phase`, if it does: no new builds during the wave, and no
+    /// manning the catapult outside it.
+    pub fn hold(&self, phase: Phase) -> Option<Problem> {
+        match (self, phase) {
+            (OrderKind::Build(..), Phase::Wave | Phase::WaveOver) => Some(Problem::WaveOn),
+            (OrderKind::Man(_), Phase::Preparing | Phase::WaveOver) => Some(Problem::NoWave),
+            _ => None,
+        }
     }
 }
 
@@ -79,6 +142,8 @@ pub enum Problem {
     /// A build during the wave. Unlike the other problems, the order isn't skipped: it waits in
     /// the queue for the next prepare phase.
     WaveOn,
+    /// Manning the catapult outside the wave. It waits in the queue for the wave.
+    NoWave,
 }
 
 impl Problem {
@@ -88,12 +153,13 @@ impl Problem {
             Problem::BackpackFull => "Backpack full",
             Problem::Unreachable => "Can't get there",
             Problem::WaveOn => "Waits until the wave is over",
+            Problem::NoWave => "Waits for the wave",
         }
     }
 
     /// Whether the order stays queued for later instead of being skipped.
     pub fn holds(self) -> bool {
-        self == Problem::WaveOn
+        matches!(self, Problem::WaveOn | Problem::NoWave)
     }
 }
 
@@ -158,12 +224,11 @@ impl OrderQueue {
         self.orders.first().filter(|_| self.started)
     }
 
-    /// The order the keeper takes up next: the first one, or while builds can't be started
-    /// (during a wave), the first one that isn't a build.
-    pub fn next_up(&self, building: bool) -> Option<&Order> {
+    /// The order the keeper takes up next: the first one that doesn't have to wait in `phase`.
+    pub fn next_up(&self, phase: Phase) -> Option<&Order> {
         self.orders
             .iter()
-            .find(|order| building || !order.kind.waits_for_wave())
+            .find(|order| order.kind.hold(phase).is_none())
     }
 
     /// The first index an order can be moved or inserted to (behind the started order).
@@ -251,7 +316,7 @@ impl OrderQueue {
     }
 
     /// Marks an order as being carried out and returns it. It moves to the front, ahead of any
-    /// builds waiting for the wave to end.
+    /// orders waiting for their phase.
     pub fn start(&mut self, id: OrderId) -> Option<Order> {
         let order = self.orders.remove(self.index_of(id)?);
         self.orders.insert(0, order);
@@ -287,15 +352,15 @@ pub struct WoodStep {
 /// Plans the queue's wood: which orders will run short of wood or overfill the backpack, and how
 /// much wood there is after each one.
 ///
-/// `building` is whether builds can be started (not during a wave). If not, builds wait, except
-/// the `started` one, which the keeper finishes. Waiting orders don't change the wood.
+/// Orders that can't be started in `phase` wait (see [`OrderKind::hold`]), except the `started`
+/// one, which the keeper finishes. Waiting orders don't change the wood.
 ///
 /// `reachable` is asked about each order that has enough wood, in queue order, so route planning can
 /// run alongside. An unreachable order is skipped too, so it doesn't change the wood.
 pub fn plan_wood(
     orders: &[Order],
     backpack: &Backpack,
-    building: bool,
+    phase: Phase,
     started: Option<OrderId>,
     mut reachable: impl FnMut(&Order) -> bool,
 ) -> Vec<WoodStep> {
@@ -303,9 +368,8 @@ pub fn plan_wood(
     orders
         .iter()
         .map(|order| {
-            let waits = !building && order.kind.waits_for_wave() && Some(order.id) != started;
-            let problem = waits
-                .then_some(Problem::WaveOn)
+            let hold = order.kind.hold(phase).filter(|_| Some(order.id) != started);
+            let problem = hold
                 .or_else(|| backpack.problem(&order.kind))
                 .or_else(|| (!reachable(order)).then_some(Problem::Unreachable));
             if problem.is_none() {
@@ -331,7 +395,11 @@ mod tests {
     }
 
     fn build() -> OrderKind {
-        OrderKind::Build(IVec2::new(1, 1))
+        OrderKind::tower(IVec2::new(1, 1))
+    }
+
+    fn man() -> OrderKind {
+        OrderKind::Man(IVec2::new(-1, 1))
     }
 
     fn kinds(queue: &OrderQueue) -> Vec<OrderKind> {
@@ -473,7 +541,9 @@ mod tests {
         for kind in orders {
             queue.push(kind);
         }
-        let steps = plan_wood(queue.orders(), &backpack(0), true, None, |_| true);
+        let steps = plan_wood(queue.orders(), &backpack(0), Phase::Preparing, None, |_| {
+            true
+        });
         let wood: Vec<u32> = steps.iter().map(|step| step.wood_after).collect();
         assert_eq!(wood, vec![1, 2, 3, 0, 1]);
         assert!(steps.iter().all(|step| step.problem.is_none()));
@@ -487,7 +557,9 @@ mod tests {
         queue.push(tree(1));
         queue.push(tree(2));
         queue.push(build());
-        let steps = plan_wood(queue.orders(), &backpack(1), true, None, |_| true);
+        let steps = plan_wood(queue.orders(), &backpack(1), Phase::Preparing, None, |_| {
+            true
+        });
         // 1 + 1 = 2 wood isn't enough for the first build, so it's skipped and keeps the wood,
         // which makes the second build possible.
         assert_eq!(
@@ -505,11 +577,15 @@ mod tests {
         for index in 0..3 {
             queue.push(tree(index));
         }
-        let steps = plan_wood(queue.orders(), &backpack(0), true, None, |_| true);
+        let steps = plan_wood(queue.orders(), &backpack(0), Phase::Preparing, None, |_| {
+            true
+        });
         assert_eq!(steps[0].problem, Some(Problem::NotEnoughWood));
 
         queue.move_to(first_build, 3);
-        let steps = plan_wood(queue.orders(), &backpack(0), true, None, |_| true);
+        let steps = plan_wood(queue.orders(), &backpack(0), Phase::Preparing, None, |_| {
+            true
+        });
         assert!(steps.iter().all(|step| step.problem.is_none()));
         assert_eq!(steps[3].wood_after, 0);
     }
@@ -519,7 +595,9 @@ mod tests {
         let mut queue = OrderQueue::default();
         queue.push(tree(0));
         queue.push(tree(1));
-        let steps = plan_wood(queue.orders(), &backpack(4), true, None, |_| true);
+        let steps = plan_wood(queue.orders(), &backpack(4), Phase::Preparing, None, |_| {
+            true
+        });
         assert_eq!(problems(&steps), vec![None, Some(Problem::BackpackFull)]);
         assert_eq!(steps[1].wood_after, 5);
     }
@@ -529,9 +607,13 @@ mod tests {
         let mut queue = OrderQueue::default();
         let blocked = queue.push(tree(0)).unwrap();
         queue.push(tree(1));
-        let steps = plan_wood(queue.orders(), &backpack(0), true, None, |order| {
-            order.id != blocked
-        });
+        let steps = plan_wood(
+            queue.orders(),
+            &backpack(0),
+            Phase::Preparing,
+            None,
+            |order| order.id != blocked,
+        );
         assert_eq!(problems(&steps), vec![Some(Problem::Unreachable), None]);
         assert_eq!(steps[0].wood_after, 0);
         assert_eq!(steps[1].wood_after, 1);
@@ -543,10 +625,16 @@ mod tests {
         queue.push(build());
         queue.push(OrderKind::Walk(Vec2::ZERO));
         let mut asked = Vec::new();
-        plan_wood(queue.orders(), &backpack(0), true, None, |order| {
-            asked.push(order.kind);
-            true
-        });
+        plan_wood(
+            queue.orders(),
+            &backpack(0),
+            Phase::Preparing,
+            None,
+            |order| {
+                asked.push(order.kind);
+                true
+            },
+        );
         assert_eq!(asked, vec![OrderKind::Walk(Vec2::ZERO)]);
     }
 
@@ -556,7 +644,7 @@ mod tests {
         queue.push(build());
         queue.push(tree(0));
         queue.push(tree(1));
-        let steps = plan_wood(queue.orders(), &backpack(3), false, None, |_| true);
+        let steps = plan_wood(queue.orders(), &backpack(3), Phase::Wave, None, |_| true);
         assert_eq!(problems(&steps), vec![Some(Problem::WaveOn), None, None]);
         let wood: Vec<u32> = steps.iter().map(|step| step.wood_after).collect();
         assert_eq!(wood, vec![3, 4, 5]);
@@ -570,7 +658,13 @@ mod tests {
         let started = queue.push(build()).unwrap();
         queue.start(started);
         queue.push(build());
-        let steps = plan_wood(queue.orders(), &backpack(6), false, Some(started), |_| true);
+        let steps = plan_wood(
+            queue.orders(),
+            &backpack(6),
+            Phase::Wave,
+            Some(started),
+            |_| true,
+        );
         assert_eq!(problems(&steps), vec![None, Some(Problem::WaveOn)]);
     }
 
@@ -579,15 +673,70 @@ mod tests {
         let mut queue = OrderQueue::default();
         queue.push(build());
         let chop = queue.push(tree(0)).unwrap();
-        assert_eq!(queue.next_up(true).map(|order| order.kind), Some(build()));
-        assert_eq!(queue.next_up(false).map(|order| order.id), Some(chop));
+        assert_eq!(
+            queue.next_up(Phase::Preparing).map(|order| order.kind),
+            Some(build())
+        );
+        assert_eq!(queue.next_up(Phase::Wave).map(|order| order.id), Some(chop));
 
         // Starting it moves it to the front, ahead of the waiting build.
         queue.start(chop);
         assert_eq!(kinds(&queue), vec![tree(0), build()]);
         assert_eq!(queue.started().map(|order| order.id), Some(chop));
         queue.finish();
-        assert_eq!(queue.next_up(false), None, "only the waiting build is left");
+        assert_eq!(
+            queue.next_up(Phase::Wave),
+            None,
+            "only the waiting build is left"
+        );
+    }
+
+    #[test]
+    fn the_catapult_is_manned_only_during_the_wave() {
+        let mut queue = OrderQueue::default();
+        queue.push(man());
+        let chop = queue.push(tree(0)).unwrap();
+        let steps = plan_wood(queue.orders(), &backpack(0), Phase::Preparing, None, |_| {
+            true
+        });
+        assert_eq!(problems(&steps), vec![Some(Problem::NoWave), None]);
+        assert!(Problem::NoWave.holds());
+        assert_eq!(queue.next_up(Phase::Preparing).map(|o| o.id), Some(chop));
+        assert_eq!(queue.next_up(Phase::Wave).map(|o| o.kind), Some(man()));
+        let steps = plan_wood(queue.orders(), &backpack(0), Phase::Wave, None, |_| true);
+        assert!(steps.iter().all(|step| step.problem.is_none()));
+        // Once the last slime is gone, it's too late to get in.
+        assert_eq!(queue.next_up(Phase::WaveOver).map(|o| o.id), Some(chop));
+        assert_eq!(man().hold(Phase::WaveOver), Some(Problem::NoWave));
+        assert_eq!(build().hold(Phase::WaveOver), Some(Problem::WaveOn));
+    }
+
+    #[test]
+    fn orders_on_the_same_structure_are_the_same() {
+        let cell = IVec2::new(2, 0);
+        assert!(OrderKind::tower(cell).same_target(&OrderKind::Build(cell, Building::Catapult)));
+        assert!(OrderKind::Repair(cell).same_target(&OrderKind::Repair(cell)));
+        assert!(!OrderKind::Repair(cell).same_target(&OrderKind::Man(cell)));
+        assert!(OrderKind::Man(cell).same_target(&OrderKind::Man(cell)));
+    }
+
+    #[test]
+    fn what_orders_cost_and_take() {
+        let cell = IVec2::ZERO;
+        assert_eq!(
+            OrderKind::Build(cell, Building::Catapult).wood_change(),
+            -(CATAPULT_WOOD_COST as i32)
+        );
+        assert_eq!(
+            OrderKind::Build(cell, Building::Catapult).work_seconds(),
+            CATAPULT_BUILD_SECONDS
+        );
+        assert_eq!(OrderKind::Repair(cell).wood_change(), 0);
+        assert_eq!(OrderKind::Repair(cell).work_seconds(), REPAIR_SECONDS);
+        assert!(OrderKind::Man(cell).open_ended());
+        assert!(!OrderKind::Repair(cell).open_ended());
+        assert_eq!(OrderKind::Repair(cell).hold(Phase::Wave), None);
+        assert_eq!(OrderKind::Repair(cell).hold(Phase::Preparing), None);
     }
 
     #[test]

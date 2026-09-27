@@ -1,10 +1,13 @@
-//! The keeper's animation: waddling, turning, tool swings, shrugging, and logs on his back.
+//! The keeper's animation: waddling, turning, tool swings, shrugging, working the catapult, and
+//! logs on his back.
 
 use super::work::STRIKE_AT;
 use super::{
     Backpack, BackpackLog, IncomingLog, Keeper, KeeperArm, KeeperBody, KeeperFoot, OrderKind,
     OrderQueue, Task, Tool,
 };
+use crate::catapult::Catapult;
+use crate::catapult::shot::Loader;
 use crate::juice::Tween;
 use crate::phase::{GameState, keeper_working};
 use bevy::prelude::*;
@@ -32,6 +35,7 @@ pub(super) fn animate_keeper(
     mut arm: Query<&mut Transform, ArmFilter>,
     mut feet: Query<(&KeeperFoot, &mut Transform), FootFilter>,
     mut tools: Query<(&Tool, &mut Visibility)>,
+    catapults: Query<&Catapult>,
 ) {
     let Ok((mut keeper, mut transform)) = keeper.single_mut() else {
         return;
@@ -57,8 +61,44 @@ pub(super) fn animate_keeper(
         roll = wave.sin() * 0.09;
         lean = 0.1;
         arm_angle = ARM_REST + wave.sin() * 0.55;
+    } else if let Task::Manning {
+        catapult, board, ..
+    } = keeper.task
+        && board >= 1.0
+        && let Ok(catapult) = catapults.get(catapult)
+    {
+        // On the catapult: hauling on the release as it charges (leaning back, arm pulled back),
+        // flinging the arm forward as it throws, then cranking the winch.
+        match catapult.loader {
+            Loader::Charging { .. } => {
+                let charge = catapult.loader.charge();
+                let strain = if charge >= 1.0 {
+                    0.03 * (t * 35.0).sin()
+                } else {
+                    0.0
+                };
+                arm_angle = ARM_REST + 1.2 * charge + strain;
+                lean = -0.14 * charge;
+                roll = strain;
+            }
+            Loader::Reloading { .. } if catapult.loader.loaded() < 0.12 => {
+                arm_angle = ARM_WOUND_UP;
+                lean = 0.12;
+            }
+            Loader::Reloading { .. } => {
+                arm_angle = ARM_REST - 0.7 + 0.6 * (t * 14.0).sin();
+                bob = 0.01 * (t * 14.0).sin().abs();
+            }
+            Loader::Ready => {
+                arm_angle = ARM_REST + 0.3 + 0.05 * (t * 3.0).sin();
+                bob = 0.004 * (t * 2.4).sin();
+            }
+        }
     } else if !paused && let Task::Working { elapsed, swing, .. } = keeper.task {
-        let hammer = matches!(queue.started().map(|o| o.kind), Some(OrderKind::Build(_)));
+        let hammer = matches!(
+            queue.started().map(|o| o.kind),
+            Some(OrderKind::Build(..) | OrderKind::Repair(_))
+        );
         let wound_up = if hammer {
             ARM_HAMMER_WOUND_UP
         } else {
@@ -92,13 +132,15 @@ pub(super) fn animate_keeper(
         transform.translation.z = stride;
     }
 
-    // Hammer for building (including on the way to the site), axe otherwise.
+    // Hammer for building and repairing (including on the way there), axe otherwise, and hands
+    // free on the catapult.
     let tool = match queue.started().map(|order| order.kind) {
-        Some(OrderKind::Build(_)) => Tool::Hammer,
-        _ => Tool::Axe,
+        _ if keeper.task.in_catapult() => None,
+        Some(OrderKind::Build(..) | OrderKind::Repair(_)) => Some(Tool::Hammer),
+        _ => Some(Tool::Axe),
     };
     for (kind, mut visibility) in &mut tools {
-        visibility.set_if_neq(if *kind == tool {
+        visibility.set_if_neq(if Some(*kind) == tool {
             Visibility::Inherited
         } else {
             Visibility::Hidden

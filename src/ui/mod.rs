@@ -1,7 +1,9 @@
 //! The on-screen UI: the order queue and its timeline, the prepare clock and the bell, the wood
-//! and hearth counters, numbered markers over order targets, a label at the cursor, popups and
-//! banners, the tile offer, and the game over screen.
+//! and hearth counters, the build choice, numbered markers over order targets, tower health over
+//! hurt towers, a label at the cursor, popups and banners, the tile offer, and the game over
+//! screen.
 
+mod build_panel;
 mod clock;
 mod game_over;
 mod hud;
@@ -9,12 +11,12 @@ mod icons;
 mod offer_panel;
 mod queue_panel;
 mod timeline;
+mod tower_health;
 
 use crate::island::TileKind;
-use crate::keeper::{OrderId, OrderKind, PlanSystems, PlannedOrder, Problem};
+use crate::keeper::{Building, OrderId, OrderKind, PlanSystems, PlannedOrder, Problem};
 use crate::palette;
 use crate::phase::GameState;
-use crate::tuning::TOWER_WOOD_COST;
 use bevy::prelude::*;
 
 pub struct UiPlugin;
@@ -33,6 +35,7 @@ impl Plugin for UiPlugin {
                     clock::spawn_clock,
                     game_over::spawn_game_over,
                     offer_panel::spawn_offer_panel,
+                    build_panel::spawn_build_panel,
                 ),
             )
             .add_systems(OnEnter(GameState::Prepare), clock::announce_prepare)
@@ -46,6 +49,7 @@ impl Plugin for UiPlugin {
                     queue_panel::update_tooltip,
                     queue_panel::update_wave_divider,
                     queue_panel::update_late_note,
+                    queue_panel::update_header_hint,
                     timeline::update_track,
                     clock::update_clock,
                     clock::update_bell,
@@ -64,6 +68,8 @@ impl Plugin for UiPlugin {
                 (
                     clock::announce_cleared,
                     hud::update_hearth_counter,
+                    build_panel::update_build_panel,
+                    tower_health::update_tower_bars,
                     game_over::update_game_over,
                     (
                         offer_panel::update_offer_panel,
@@ -109,7 +115,9 @@ pub struct OrderFinished(pub OrderId);
 pub fn order_color(kind: &OrderKind) -> Color {
     match kind {
         OrderKind::Chop(_) => palette::ORDER_CHOP,
-        OrderKind::Build(_) => palette::ORDER_BUILD,
+        OrderKind::Build(..) => palette::ORDER_BUILD,
+        OrderKind::Repair(_) => palette::ORDER_REPAIR,
+        OrderKind::Man(_) => palette::ORDER_CATAPULT,
         OrderKind::Walk(_) => palette::ORDER_WALK,
     }
 }
@@ -117,8 +125,18 @@ pub fn order_color(kind: &OrderKind) -> Color {
 pub fn order_title(kind: &OrderKind) -> &'static str {
     match kind {
         OrderKind::Chop(_) => "Chop tree",
-        OrderKind::Build(_) => "Build tower",
+        OrderKind::Build(_, Building::Tower) => "Build tower",
+        OrderKind::Build(_, Building::Catapult) => "Build catapult",
+        OrderKind::Repair(_) => "Repair tower",
+        OrderKind::Man(_) => "Man catapult",
         OrderKind::Walk(_) => "Walk here",
+    }
+}
+
+pub fn building_name(building: Building) -> &'static str {
+    match building {
+        Building::Tower => "Tower",
+        Building::Catapult => "Catapult",
     }
 }
 
@@ -134,16 +152,18 @@ pub fn wood_label(kind: &OrderKind) -> String {
 pub fn problem_text(planned: &PlannedOrder, wood_before: u32) -> Option<String> {
     Some(match planned.problem? {
         Problem::NotEnoughWood => {
-            format!("Not enough wood: needs {TOWER_WOOD_COST}, will have {wood_before}")
+            let needs = -planned.order.kind.wood_change();
+            format!("Not enough wood: needs {needs}, will have {wood_before}")
         }
         Problem::BackpackFull => "Backpack will be full".to_string(),
         Problem::Unreachable => Problem::Unreachable.message().to_string(),
         Problem::WaveOn => "No building during the wave: waits for the next prepare phase".into(),
+        Problem::NoWave => "Waits for the wave: he gets in when the slimes come".into(),
     })
 }
 
-/// The color that flags a problem: red for orders that will be skipped, slime lilac for builds
-/// waiting for the wave to end.
+/// The color that flags a problem: red for orders that will be skipped, slime lilac for orders
+/// waiting for their phase (builds during the wave, the catapult outside it).
 pub fn problem_color(problem: Problem) -> Color {
     if problem.holds() {
         palette::WAVE_HOLD
@@ -167,7 +187,9 @@ pub fn duration_text(planned: &PlannedOrder) -> String {
     let walk = format!("{} walk", format_seconds(planned.walk_seconds));
     let work = match planned.order.kind {
         OrderKind::Chop(_) => "chop",
-        OrderKind::Build(_) => "build",
+        OrderKind::Build(..) => "build",
+        OrderKind::Repair(_) => "repair",
+        OrderKind::Man(_) => return format!("{walk}, then in until you call him out"),
         OrderKind::Walk(_) => return walk,
     };
     format!("{walk} + {} {work}", format_seconds(planned.work_seconds))
@@ -225,7 +247,12 @@ mod tests {
 
     #[test]
     fn wood_labels_are_signed() {
-        assert_eq!(wood_label(&OrderKind::Build(IVec2::ZERO)), "-3");
+        assert_eq!(wood_label(&OrderKind::tower(IVec2::ZERO)), "-3");
+        assert_eq!(
+            wood_label(&OrderKind::Build(IVec2::ZERO, Building::Catapult)),
+            format!("-{}", crate::tuning::CATAPULT_WOOD_COST)
+        );
+        assert_eq!(wood_label(&OrderKind::Repair(IVec2::ZERO)), "");
         assert_eq!(wood_label(&OrderKind::Walk(Vec2::ZERO)), "");
     }
 }

@@ -6,6 +6,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod camera;
+mod catapult;
 mod dev;
 mod environment;
 mod hearth;
@@ -42,6 +43,7 @@ fn main() {
             island::IslandPlugin,
             hearth::HearthPlugin,
             towers::TowersPlugin,
+            catapult::CatapultPlugin,
             slimes::SlimesPlugin,
             phase::PhasePlugin,
             keeper::KeeperPlugin,

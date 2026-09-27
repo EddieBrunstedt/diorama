@@ -1,11 +1,14 @@
 //! Slimes: they come out at the road's open end during a wave, hop down the road to the hearth
-//! and leap into its fire. Arrows pop them into a shower of voxel cubes.
+//! and leap into its fire. On the way they spit goo at towers next to the road. Arrows and
+//! boulders pop them into a shower of voxel cubes.
 //!
-//! The road, the hop, the waves and slime health are plain data in [`road`] and [`wave`]. The rest
-//! is the ECS side: spawning, moving, reacting to hits, and damaging the hearth.
+//! The road, the hop, the waves, slime health and whom to spit at are plain data in [`road`],
+//! [`wave`] and [`spit`]. The rest is the ECS side: spawning, moving, spitting, reacting to hits,
+//! and damaging the hearth.
 
 mod model;
 pub mod road;
+pub mod spit;
 pub mod wave;
 
 pub use wave::{Health, WaveRun, WaveSpec};
@@ -16,10 +19,12 @@ use crate::juice::{Burst, Flight, FlightTarget, Landed, Particles, Squash, Tween
 use crate::palette;
 use crate::phase::{GameState, Waves};
 use crate::rng::Rng;
-use crate::tuning::{SLIME_DAMAGE, SLIME_HP_FIRST_WAVE, SLIME_SPEED};
-use crate::voxel::{VOXEL, VoxelMaterial, shade};
+use crate::towers::{Tower, TowerHit, goo_spot};
+use crate::tuning::{SLIME_DAMAGE, SLIME_HP_FIRST_WAVE, SLIME_SPEED, SPIT_COOLDOWN, SPIT_REACH};
+use crate::voxel::{TILE_SIZE, VOXEL, VoxelMaterial, shade};
 use bevy::prelude::*;
 use road::{HOP_SECONDS, RoadPath, air_speed, hop};
+use spit::{SpitTarget, pick_spit_target};
 
 /// Height of a slime's middle above the ground, at scale 1.
 pub const MIDDLE_HEIGHT: f32 = model::MIDDLE * VOXEL;
@@ -40,6 +45,11 @@ const FLASH_TIME: f32 = 0.08;
 const HEARTH_TARGET_HEIGHT: f32 = 0.25;
 const LEAP_HEIGHT: f32 = 0.45;
 const LEAP_TIME: f32 = 0.42;
+/// Spat goo arcs this high and flies this fast (world units per second).
+const SPIT_ARC: f32 = 0.35;
+const SPIT_SPEED: f32 = 2.2;
+/// Where on a slime the goo comes out, at scale 1: its mouth.
+const MOUTH: Vec3 = Vec3::new(0.0, 0.12, 0.18);
 
 pub struct SlimesPlugin;
 
@@ -49,7 +59,7 @@ impl Plugin for SlimesPlugin {
             .init_resource::<SlimeAssets>()
             .init_resource::<Road>()
             .init_resource::<WaveRun>()
-            .add_message::<ArrowHit>()
+            .add_message::<SlimeHit>()
             .add_systems(OnEnter(GameState::Wave), start_wave_run)
             .add_systems(OnExit(GameState::GameOver), clear_slimes)
             .add_systems(
@@ -58,12 +68,14 @@ impl Plugin for SlimesPlugin {
                     update_road,
                     spawn_slimes.run_if(in_state(GameState::Wave)),
                     hop_slimes,
+                    spit_at_towers.run_if(in_state(GameState::Wave)),
                     take_hits,
                     fade_flashes,
                 )
                     .chain(),
             )
-            .add_observer(into_hearth);
+            .add_observer(into_hearth)
+            .add_observer(goo_lands);
     }
 }
 
@@ -81,6 +93,17 @@ pub struct Slime {
     body: Entity,
     /// Seconds left of the white flash after a hit.
     flash: f32,
+    /// Seconds until it has gathered enough goo to spit again.
+    spit: f32,
+    /// It landed a hop this frame.
+    landed: bool,
+}
+
+/// Goo on its way from a slime to a tower. It sticks where it lands.
+#[derive(Component, Debug)]
+struct Spit {
+    tower: Entity,
+    at: Vec3,
 }
 
 /// A slime leaping into the hearth. It does its damage when it lands.
@@ -95,11 +118,20 @@ pub struct Road {
     pub hearth: Vec2,
 }
 
-/// An arrow hit a slime.
+/// Something hit a slime.
 #[derive(Message, Clone, Copy, Debug)]
-pub struct ArrowHit {
+pub struct SlimeHit {
     pub slime: Entity,
     pub damage: u32,
+    pub by: HitBy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HitBy {
+    /// A tower's arrow, which the tower counted on (see [`Health::expect`]).
+    Arrow,
+    /// A catapult boulder: a big splat.
+    Boulder,
 }
 
 #[derive(Resource)]
@@ -195,6 +227,8 @@ fn spawn_slimes(
                     hop: rng.range(0.0, 0.3),
                     body,
                     flash: 0.0,
+                    spit: SPIT_COOLDOWN * rng.range(0.4, 1.0),
+                    landed: false,
                 },
                 Transform {
                     translation: at,
@@ -243,8 +277,10 @@ fn hop_slimes(
         if advancing && now.airborne {
             slime.distance += air_speed(SLIME_SPEED) * dt;
         }
+        slime.spit -= dt;
+        slime.landed = before.floor() != slime.hop.floor();
         if let Ok(mut squash) = squashes.get_mut(slime.body) {
-            if before.floor() != slime.hop.floor() {
+            if slime.landed {
                 squash.pulse(-0.3);
             } else if !hop(before).airborne && now.airborne {
                 squash.pulse(0.28);
@@ -279,10 +315,84 @@ fn hop_slimes(
     }
 }
 
-/// Arrows flash and squash slimes, and pop them into cubes when their hit points run out.
+/// A slime that has just landed a hop, has goo ready and a standing tower in reach, spits at it.
+fn spit_at_towers(
+    mut commands: Commands,
+    mut slimes: Query<(&mut Slime, &GlobalTransform)>,
+    towers: Query<(Entity, &Tower, &GlobalTransform)>,
+    mut squashes: Query<&mut Squash>,
+    mut particles: Particles,
+    mut rng: Local<Option<Rng>>,
+) {
+    let rng = rng.get_or_insert_with(|| Rng::new(0x5_917));
+    for (mut slime, global) in &mut slimes {
+        if !slime.landed || slime.spit > 0.0 || slime.health.hp == 0 {
+            continue;
+        }
+        let from = global.translation().xz();
+        let candidates = towers.iter().map(|(entity, tower, at)| SpitTarget {
+            id: entity,
+            position: at.translation().xz(),
+            broken: tower.health.is_broken(),
+        });
+        let Some(target) = pick_spit_target(from, SPIT_REACH * TILE_SIZE, candidates) else {
+            continue;
+        };
+        let Ok((_, _, tower)) = towers.get(target) else {
+            continue;
+        };
+        slime.spit = SPIT_COOLDOWN;
+        let toward = from - tower.translation().xz();
+        let at = tower.translation() + goo_spot(toward, rng);
+        let mouth = global.transform_point(MOUTH);
+        let flight = (mouth.distance(at) / SPIT_SPEED).max(0.25);
+        commands.spawn((
+            Spit { tower: target, at },
+            particles.cube(palette::GOO),
+            Transform::from_translation(mouth).with_scale(Vec3::splat(0.075)),
+            Flight::new(mouth, FlightTarget::Point(at), SPIT_ARC, flight).with_spin(12.0),
+        ));
+        // A big "hork": it rears up as it spits.
+        if let Ok(mut squash) = squashes.get_mut(slime.body) {
+            squash.pulse(0.4);
+        }
+        particles.burst(
+            &mut commands,
+            mouth,
+            Burst {
+                colors: &[palette::GOO, palette::SLIME],
+                count: 3,
+                size: 0.03,
+                spread: 0.5,
+                lift: 0.9,
+                lifetime: 0.35,
+            },
+        );
+    }
+}
+
+/// Spat goo reaches its tower.
+fn goo_lands(
+    landed: On<Landed>,
+    spits: Query<&Spit>,
+    towers: Query<(), With<Tower>>,
+    mut hits: MessageWriter<TowerHit>,
+) {
+    if let Ok(spit) = spits.get(landed.entity)
+        && towers.contains(spit.tower)
+    {
+        hits.write(TowerHit {
+            tower: spit.tower,
+            at: spit.at,
+        });
+    }
+}
+
+/// Arrows and boulders flash and squash slimes, and pop them into cubes when their hit points run
+/// out.
 fn take_hits(
     mut commands: Commands,
-    mut hits: MessageReader<ArrowHit>,
+    mut hits: MessageReader<SlimeHit>,
     mut slimes: Query<(&mut Slime, &GlobalTransform)>,
     mut bodies: Query<(&mut Squash, &mut MeshMaterial3d<StandardMaterial>)>,
     assets: Res<SlimeAssets>,
@@ -298,9 +408,16 @@ fn take_hits(
             continue;
         }
         let middle = global.transform_point(Vec3::Y * MIDDLE_HEIGHT);
-        if slime.health.hit(hit.damage) {
+        let boulder = hit.by == HitBy::Boulder;
+        let popped = match hit.by {
+            HitBy::Arrow => slime.health.hit(hit.damage),
+            HitBy::Boulder => slime.health.smash(hit.damage),
+        };
+        if popped {
             commands.entity(hit.slime).despawn();
             run.slime_gone();
+            // Squashed flat by a boulder, it bursts wider.
+            let (count, spread) = if boulder { (28, 2.6) } else { (18, 1.6) };
             particles.burst(
                 &mut commands,
                 middle,
@@ -310,18 +427,18 @@ fn take_hits(
                         shade(palette::SLIME, 0.8),
                         palette::SLIME.mix(&Color::WHITE, 0.4),
                     ],
-                    count: 18,
+                    count,
                     size: 0.075,
-                    spread: 1.6,
+                    spread,
                     lift: 2.6,
                     lifetime: 0.9,
                 },
             );
             continue;
         }
-        slime.flash = FLASH_TIME;
+        slime.flash = FLASH_TIME * if boulder { 2.0 } else { 1.0 };
         if let Ok((mut squash, mut material)) = bodies.get_mut(slime.body) {
-            squash.pulse(-0.35);
+            squash.pulse(if boulder { -0.6 } else { -0.35 });
             material.0 = assets.flash.clone();
         }
         particles.burst(
@@ -392,7 +509,7 @@ fn into_hearth(
 
 fn clear_slimes(
     mut commands: Commands,
-    slimes: Query<Entity, Or<(With<Slime>, With<Leaping>)>>,
+    slimes: Query<Entity, Or<(With<Slime>, With<Leaping>, With<Spit>)>>,
     mut run: ResMut<WaveRun>,
 ) {
     for slime in &slimes {

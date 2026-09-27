@@ -4,18 +4,23 @@
 //! - `DIORAMA_SCREENSHOT=shot.png cargo run` saves a screenshot after a few seconds and quits,
 //!   for checking visuals without clicking around. `DIORAMA_SCREENSHOT_AT` sets the time in
 //!   seconds; a comma-separated list takes several (`shot-1.png`, `shot-2.png`, ...).
-//! - `DIORAMA_DEMO=1` queues a few sample orders at startup.
+//! - `DIORAMA_DEMO=1` queues a few sample orders at startup. `DIORAMA_DEMO=catapult` starts with
+//!   a full backpack and queues a tower by the road and the catapult, then mans the catapult once
+//!   it stands, to try out the wave-phase actions.
 //! - `DIORAMA_SCRIPT="3 move 800 450; 3.1 down; 3.2 up"` fakes mouse input at the given times
 //!   (seconds): `move X Y` (logical pixels), `down`/`up` (left button), `shift`/`unshift`, and
 //!   `key K` to tap a key (a letter, a digit, or `esc`), e.g. `key b` rings the bell.
 //! - `DIORAMA_SPEED=4` runs the game four times as fast, e.g. to get to later waves quickly.
 //!   Screenshot and script times are in game time, so they speed up too.
 //! - `DIORAMA_SEED=7` fixes the random seed for the tile offers, so scripted runs repeat.
+//! - `DIORAMA_WAVE=4` starts the run at wave 4, e.g. to see slimes spit at towers.
 
 mod fps;
 
+use crate::catapult::Catapult;
 use crate::island::TreeId;
-use crate::keeper::{OrderKind, OrderQueue};
+use crate::keeper::{Backpack, Building, OrderKind, OrderQueue};
+use crate::phase::Waves;
 use bevy::{
     input::{
         ButtonState,
@@ -54,8 +59,15 @@ impl Plugin for DevPlugin {
             })
             .add_systems(Update, auto_screenshot);
         }
-        if std::env::var("DIORAMA_DEMO").is_ok() {
-            app.add_systems(Startup, queue_demo_orders);
+        match std::env::var("DIORAMA_DEMO").as_deref() {
+            Ok("catapult") => {
+                app.add_systems(Startup, queue_catapult_demo)
+                    .add_systems(Update, man_demo_catapult);
+            }
+            Ok(_) => {
+                app.add_systems(Startup, queue_demo_orders);
+            }
+            Err(_) => {}
         }
         if let Some(speed) = std::env::var("DIORAMA_SPEED")
             .ok()
@@ -65,6 +77,14 @@ impl Plugin for DevPlugin {
                 time.set_relative_speed(speed);
                 // Let long frames through, so fast-forwarding doesn't slow down again.
                 time.set_max_delta(std::time::Duration::from_secs_f32(0.25 * speed));
+            });
+        }
+        if let Some(wave) = std::env::var("DIORAMA_WAVE")
+            .ok()
+            .and_then(|wave| wave.parse::<u32>().ok())
+        {
+            app.add_systems(Startup, move |mut waves: ResMut<Waves>| {
+                waves.completed = wave.saturating_sub(1);
             });
         }
         if let Ok(script) = std::env::var("DIORAMA_SCRIPT") {
@@ -130,15 +150,41 @@ fn queue_demo_orders(mut queue: ResMut<OrderQueue>) {
         tree(-2, -1, 0),
         tree(-2, -2, 0),
         tree(-1, -2, 1),
-        OrderKind::Build(IVec2::new(-1, -1)),
+        OrderKind::tower(IVec2::new(-1, -1)),
         OrderKind::Walk(Vec2::new(1.2, 1.3)),
-        OrderKind::Build(IVec2::new(0, 1)),
+        OrderKind::tower(IVec2::new(0, 1)),
         tree(-2, 1, 0),
         tree(2, 1, 0),
         tree(2, 2, 0),
-        OrderKind::Build(IVec2::new(1, 1)),
+        OrderKind::tower(IVec2::new(1, 1)),
     ] {
         queue.push(kind);
+    }
+}
+
+/// A tower next to the road (where slimes will spit at it), and the catapult.
+fn queue_catapult_demo(mut queue: ResMut<OrderQueue>, mut backpack: ResMut<Backpack>) {
+    backpack.wood = backpack.capacity;
+    let tree = |x, y, index| {
+        OrderKind::Chop(TreeId {
+            cell: IVec2::new(x, y),
+            index,
+        })
+    };
+    for kind in [
+        OrderKind::tower(IVec2::new(2, -1)),
+        tree(2, 1, 0),
+        tree(2, 1, 1),
+        OrderKind::Build(IVec2::new(-1, 1), Building::Catapult),
+    ] {
+        queue.push(kind);
+    }
+}
+
+/// Mans the demo catapult as soon as it stands.
+fn man_demo_catapult(catapults: Query<&Catapult, Added<Catapult>>, mut queue: ResMut<OrderQueue>) {
+    for catapult in &catapults {
+        queue.push(OrderKind::Man(catapult.cell));
     }
 }
 
@@ -162,7 +208,9 @@ fn key_code(name: &str) -> Option<KeyCode> {
         "ESC" => KeyCode::Escape,
         "A" => KeyCode::KeyA,
         "B" => KeyCode::KeyB,
+        "C" => KeyCode::KeyC,
         "R" => KeyCode::KeyR,
+        "T" => KeyCode::KeyT,
         "1" => KeyCode::Digit1,
         "2" => KeyCode::Digit2,
         "3" => KeyCode::Digit3,

@@ -3,11 +3,15 @@
 //!
 //! Segments are placed at absolute times (time gone + time from now), so they stay put while the
 //! keeper works and the "now" line sweeps through them.
+//!
+//! Manning the catapult is open-ended, so during the wave its segment runs to the end of the
+//! track and the orders behind it aren't shown until he's out. While preparing, a catapult rides
+//! along with the slime at the wave to say he'll go to the catapult when it comes.
 
 use super::icons::Icons;
 use super::order_color;
 use super::queue_panel::{Card, STRIP_WIDTH};
-use crate::keeper::{OrderId, OrderQueue, Plan, Timeline};
+use crate::keeper::{OrderId, OrderKind, OrderQueue, Plan, Problem, Timeline};
 use crate::palette;
 use crate::phase::{GameState, PrepareClock};
 use bevy::prelude::*;
@@ -23,6 +27,7 @@ const SEGMENT_GAP: f32 = 2.0;
 /// Segments at least this wide show their order's number.
 const NUMBER_MIN_WIDTH: f32 = 15.0;
 const MARKER_SIZE: f32 = 22.0;
+const CATAPULT_MARKER_SIZE: f32 = 18.0;
 const HURRY_SECONDS: f32 = 5.0;
 
 #[derive(Component)]
@@ -32,6 +37,8 @@ pub(super) struct Track {
     overflow: Entity,
     now: Entity,
     wave: Entity,
+    /// Beside the wave's slime: a man order is waiting for the wave.
+    catapult: Entity,
 }
 
 #[derive(Component)]
@@ -46,11 +53,12 @@ pub fn px_per_second(total: f32) -> f32 {
     STRIP_WIDTH / (total + OVERFLOW_SECONDS).max(1.0)
 }
 
-/// Where a segment goes on the track (left edge and width in pixels), clipped to the track.
-/// `None` if it takes no time or lies wholly past the end.
-pub fn segment_span(start: f32, seconds: f32, scale: f32) -> Option<(f32, f32)> {
+/// Where a segment from `start` to `end` (seconds) goes on the track (left edge and width in
+/// pixels), clipped to the track. `None` if it takes no time or lies wholly past the end. An
+/// open-ended order (ending at infinity) runs to the end of the track.
+pub fn segment_span(start: f32, end: f32, scale: f32) -> Option<(f32, f32)> {
     let left = start * scale;
-    let right = ((start + seconds) * scale).min(STRIP_WIDTH);
+    let right = (end * scale).min(STRIP_WIDTH);
     let width = right - left - SEGMENT_GAP;
     (width >= 1.0).then_some((left, width))
 }
@@ -133,12 +141,30 @@ pub(super) fn spawn_track(commands: &mut Commands, panel: Entity, icons: &Icons)
             ChildOf(row),
         ))
         .id();
+    let catapult = commands
+        .spawn((
+            ImageNode::new(icons.catapult.clone()),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(BAR_TOP + BAR_HEIGHT / 2.0 - CATAPULT_MARKER_SIZE / 2.0),
+                width: Val::Px(CATAPULT_MARKER_SIZE),
+                height: Val::Px(CATAPULT_MARKER_SIZE),
+                display: Display::None,
+                ..default()
+            },
+            UiTransform::IDENTITY,
+            ZIndex(3),
+            Pickable::IGNORE,
+            ChildOf(row),
+        ))
+        .id();
     commands.entity(row).insert(Track {
         bar,
         elapsed,
         overflow,
         now,
         wave,
+        catapult,
     });
 }
 
@@ -245,7 +271,14 @@ pub(super) fn update_track(
             palette::UI_PAPER_DARK
         }),
     );
-    for (entity, shown) in [(track.now, preparing), (track.wave, preparing)] {
+    let catapult_waits = plan.orders.iter().any(|planned| {
+        matches!(planned.order.kind, OrderKind::Man(_)) && planned.problem == Some(Problem::NoWave)
+    });
+    for (entity, shown) in [
+        (track.now, preparing),
+        (track.wave, preparing),
+        (track.catapult, preparing && catapult_waits),
+    ] {
         if let Ok((mut node, _)) = nodes.get_mut(entity) {
             let display = if shown { Display::Flex } else { Display::None };
             if node.display != display {
@@ -255,6 +288,12 @@ pub(super) fn update_track(
     }
     if let Ok((mut node, _)) = nodes.get_mut(track.wave) {
         node.left = Val::Px(wave_x - MARKER_SIZE / 2.0);
+    }
+    if let Ok((mut node, _)) = nodes.get_mut(track.catapult) {
+        node.left = Val::Px(wave_x + MARKER_SIZE / 2.0 + 1.0);
+    }
+    if let Ok(mut marker) = markers.get_mut(track.catapult) {
+        marker.rotation = Rot2::radians(0.12 * (t * 2.0).sin());
     }
     if let Ok(mut marker) = markers.get_mut(track.wave) {
         // The slime at the wave bobs, and bounces eagerly when it's nearly time.
@@ -282,7 +321,7 @@ pub(super) fn update_track(
         } else {
             order_color(&planned.order.kind)
         };
-        let span = segment_span(gone + slot.start, slot.seconds(), scale);
+        let span = segment_span(gone + slot.start, gone + slot.end, scale);
         let entity = *known.entry(id).or_insert_with(|| {
             let x = span.map_or(STRIP_WIDTH, |(x, _)| x);
             spawn_segment(&mut commands, track.bar, color, x)
@@ -350,12 +389,23 @@ mod tests {
     fn segments_are_clipped_to_the_track() {
         let scale = 10.0;
         assert_eq!(
-            segment_span(1.0, 2.0, scale),
+            segment_span(1.0, 3.0, scale),
             Some((10.0, 20.0 - SEGMENT_GAP))
         );
         let (left, width) = segment_span(0.0, 1e4, scale).unwrap();
         assert_eq!(left + width + SEGMENT_GAP, STRIP_WIDTH);
-        assert_eq!(segment_span(1e4, 2.0, scale), None, "wholly past the end");
-        assert_eq!(segment_span(3.0, 0.0, scale), None, "takes no time");
+        assert_eq!(
+            segment_span(1e4, 1e4 + 2.0, scale),
+            None,
+            "wholly past the end"
+        );
+        assert_eq!(segment_span(3.0, 3.0, scale), None, "takes no time");
+        let (_, width) = segment_span(3.0, f32::INFINITY, scale).unwrap();
+        assert_eq!(30.0 + width + SEGMENT_GAP, STRIP_WIDTH, "open-ended");
+        assert_eq!(
+            segment_span(f32::INFINITY, f32::INFINITY, scale),
+            None,
+            "after an open-ended order"
+        );
     }
 }

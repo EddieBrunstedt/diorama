@@ -5,7 +5,7 @@ use super::aim::{Candidate, pick_target};
 use super::{Tower, TowerAssets};
 use crate::juice::{Burst, Particles, Squash, Tween, Wobble};
 use crate::palette;
-use crate::slimes::{ArrowHit, MIDDLE_HEIGHT, Slime};
+use crate::slimes::{HitBy, MIDDLE_HEIGHT, Slime, SlimeHit};
 use crate::tuning::{ARROW_SPEED, TOWER_COOLDOWN, TOWER_DAMAGE, TOWER_RANGE};
 use crate::voxel::{TILE_SIZE, VoxelMesh};
 use bevy::light::NotShadowCaster;
@@ -57,15 +57,15 @@ pub(super) fn shoot(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<TowerAssets>,
-    mut towers: Query<(&GlobalTransform, &mut Archer), (With<Tower>, Without<Tween>)>,
+    mut towers: Query<(&GlobalTransform, &mut Archer, &Tower), Without<Tween>>,
     mut slimes: Query<(Entity, &mut Slime, &GlobalTransform)>,
     mut bodies: Query<(&mut Squash, &Transform, Option<&Wobble>)>,
     mut particles: Particles,
 ) {
     let dt = time.delta_secs();
-    for (tower, mut archer) in &mut towers {
+    for (tower, mut archer, state) in &mut towers {
         archer.reload = (archer.reload - dt).max(0.0);
-        if archer.reload > 0.0 {
+        if archer.reload > 0.0 || state.health.is_broken() {
             continue;
         }
         let from = tower.translation().xz();
@@ -131,7 +131,7 @@ pub(super) fn fly_arrows(
     time: Res<Time>,
     mut arrows: Query<(Entity, &mut Arrow, &mut Transform)>,
     slimes: Query<&GlobalTransform, With<Slime>>,
-    mut hits: MessageWriter<ArrowHit>,
+    mut hits: MessageWriter<SlimeHit>,
     mut particles: Particles,
 ) {
     for (entity, mut arrow, mut transform) in &mut arrows {
@@ -153,9 +153,10 @@ pub(super) fn fly_arrows(
         }
         commands.entity(entity).despawn();
         if target.is_some() {
-            hits.write(ArrowHit {
+            hits.write(SlimeHit {
                 slime: arrow.target,
                 damage: TOWER_DAMAGE,
+                by: HitBy::Arrow,
             });
         } else {
             // The slime got away (into the hearth): the arrow thuds into the ground.

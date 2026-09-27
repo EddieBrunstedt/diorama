@@ -11,6 +11,8 @@ use super::{
     FlashOrder, OrderFinished, duration_text, font, format_seconds, order_color, order_title,
     paper, problem_color, problem_text, wood_label,
 };
+use crate::catapult::CatapultAim;
+use crate::catapult::shot::Loader;
 use crate::keeper::{Backpack, Keeper, OrderId, OrderKind, OrderQueue, Plan, Timeline};
 use crate::palette;
 use crate::tuning::MAX_ORDERS;
@@ -66,6 +68,13 @@ pub(super) struct WaveDivider {
 /// Says in the header how many orders won't be done before the wave.
 #[derive(Component)]
 pub(super) struct LateNote;
+
+/// The hint at the header's right: how to use the cards, or the catapult while he's in it.
+#[derive(Component)]
+pub(super) struct HeaderHint;
+
+const CARDS_HINT: &str = "drag to reorder, click to remove";
+const CATAPULT_HINT: &str = "hold click to charge, let go to throw, right-click to get out";
 
 #[derive(Component)]
 pub(super) struct Tooltip {
@@ -173,7 +182,8 @@ pub(super) fn spawn_panel(mut commands: Commands, icons: Res<Icons>) {
                             ));
                         });
                     header.spawn((
-                        Text::new("drag to reorder, click to remove"),
+                        HeaderHint,
+                        Text::new(CARDS_HINT),
                         font(12.0),
                         TextColor(palette::UI_INK_SOFT),
                         Pickable::IGNORE,
@@ -195,7 +205,7 @@ pub(super) fn spawn_panel(mut commands: Commands, icons: Res<Icons>) {
                     area.spawn((
                         EmptyHint,
                         Text::new(
-                            "Click a tree to chop it, a meadow to build a tower, anywhere else to walk.\nShift-click to do it next.",
+                            "Click a tree to chop it, a meadow to build, a hurt tower to repair it.\nAnywhere else to walk. Shift-click to do it next.",
                         ),
                         font(14.0),
                         TextColor(palette::UI_INK_SOFT),
@@ -284,11 +294,7 @@ fn spawn_card(
     kind: OrderKind,
     x: f32,
 ) -> Entity {
-    let icon = match kind {
-        OrderKind::Chop(_) => icons.chop.clone(),
-        OrderKind::Build(_) => icons.build.clone(),
-        OrderKind::Walk(_) => icons.walk.clone(),
-    };
+    let icon = icons.order(&kind);
     let card = commands
         .spawn((
             Node {
@@ -523,6 +529,7 @@ pub(super) fn animate_cards(
     plan: Res<Plan>,
     timeline: Res<Timeline>,
     keeper: Query<&Keeper>,
+    catapult: Res<CatapultAim>,
     mut cards: Query<CardVisuals>,
     mut parts: Query<&mut Node, Without<Card>>,
     mut badges: Query<&mut BackgroundColor, Without<Card>>,
@@ -531,10 +538,15 @@ pub(super) fn animate_cards(
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
-    let progress = keeper
-        .single()
-        .ok()
-        .and_then(|keeper| keeper.task.work_progress());
+    // The started card's bar shows the work done, or in the catapult, the charge or the reload.
+    let progress = keeper.single().ok().and_then(|keeper| {
+        keeper.task.work_progress().or_else(|| {
+            catapult.manned.then(|| match catapult.loader {
+                Loader::Charging { .. } => catapult.loader.charge(),
+                loader => loader.loaded(),
+            })
+        })
+    });
     let started = queue.started().map(|order| order.id);
 
     for (
@@ -636,11 +648,11 @@ pub(super) fn animate_cards(
                 icon.color = Color::WHITE.with_alpha(alpha);
             }
         }
-        let seconds = slot.map_or(0.0, |slot| slot.seconds());
-        let time = if problem || seconds < 0.05 {
-            String::new()
-        } else {
-            format_seconds(seconds)
+        // Open-ended (the catapult) and after it: no time to show.
+        let seconds = slot.map_or(Some(0.0), |slot| slot.seconds());
+        let time = match seconds {
+            Some(seconds) if !problem && seconds >= 0.05 => format_seconds(seconds),
+            _ => String::new(),
         };
         if let Ok((mut text, mut color)) = texts.get_mut(card.parts.time) {
             if text.0 != time {
@@ -721,9 +733,12 @@ pub(super) fn update_tooltip(
     let planned = plan.get(card.id);
     let slot = timeline.slots.get(index);
     let started = queue.started().is_some_and(|order| order.id == card.id);
-    let time = match (planned, slot) {
+    let time = match (planned, slot.and_then(|slot| slot.seconds())) {
         (Some(planned), _) if planned.problem.is_some() => String::new(),
-        (_, Some(slot)) if started => format!("{} left", format_seconds(slot.seconds())),
+        (Some(planned), _) if started && planned.order.kind.open_ended() => {
+            "In until you call him out (right-click)".to_string()
+        }
+        (_, Some(seconds)) if started => format!("{} left", format_seconds(seconds)),
         (Some(planned), _) => duration_text(planned),
         _ => String::new(),
     };
@@ -803,6 +818,22 @@ pub(super) fn update_late_note(
     if note.0 != text {
         note.0 = text;
     }
+}
+
+pub(super) fn update_header_hint(
+    catapult: Res<CatapultAim>,
+    hint: Single<(&mut Text, &mut TextColor), With<HeaderHint>>,
+) {
+    let (mut text, mut color) = hint.into_inner();
+    let (wanted, wanted_color) = if catapult.manned {
+        (CATAPULT_HINT, palette::ORDER_CATAPULT)
+    } else {
+        (CARDS_HINT, palette::UI_INK_SOFT)
+    };
+    if text.0 != wanted {
+        text.0 = wanted.to_string();
+    }
+    color.set_if_neq(TextColor(wanted_color));
 }
 
 fn on_press(press: On<Pointer<Press>>, mut cards: Query<&mut Card>) {

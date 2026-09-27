@@ -4,10 +4,13 @@
 //! The plan knows how long every order takes (walking there plus chopping or building). The order
 //! in progress is the exception: its time left shrinks as the keeper works, so it's passed in
 //! separately and the timeline is rebuilt every frame (it's only a running sum).
+//!
+//! Manning the catapult is open-ended: it lasts until the keeper is called out, so it ends at
+//! infinity, and the orders behind it start and end there too ("some time after").
 
 use super::route::PlannedOrder;
 
-/// When one order happens, in seconds from now.
+/// When one order happens, in seconds from now. Both can be infinite: see [`schedule`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Slot {
     pub start: f32,
@@ -17,8 +20,11 @@ pub struct Slot {
 }
 
 impl Slot {
-    pub fn seconds(&self) -> f32 {
-        self.end - self.start
+    /// How long the order takes, if that's known: `None` for an open-ended order and the orders
+    /// behind it.
+    pub fn seconds(&self) -> Option<f32> {
+        let seconds = self.end - self.start;
+        seconds.is_finite().then_some(seconds)
     }
 }
 
@@ -27,6 +33,7 @@ impl Slot {
 /// `started_left` is the time left on the first order if the keeper is already carrying it out.
 /// `deadline` is the time until the wave starts, if the prepare phase is on: orders that end after
 /// it are late. Skipped orders take no time and are never late (they're flagged already).
+/// An open-ended order that isn't skipped runs until further notice.
 pub fn schedule(
     orders: &[PlannedOrder],
     started_left: Option<f32>,
@@ -43,6 +50,9 @@ pub fn schedule(
             };
             let start = now;
             now += seconds;
+            if planned.problem.is_none() && planned.order.kind.open_ended() {
+                now = f32::INFINITY;
+            }
             Slot {
                 start,
                 end: now,
@@ -69,12 +79,16 @@ pub fn first_late(slots: &[Slot]) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::keeper::queue::{Order, OrderKind, OrderQueue, Problem};
-    use bevy::math::Vec2;
+    use bevy::math::{IVec2, Vec2};
 
     fn orders(count: usize) -> Vec<Order> {
+        orders_of(&vec![OrderKind::Walk(Vec2::ZERO); count])
+    }
+
+    fn orders_of(kinds: &[OrderKind]) -> Vec<Order> {
         let mut queue = OrderQueue::default();
-        for _ in 0..count {
-            queue.push(OrderKind::Walk(Vec2::ZERO));
+        for &kind in kinds {
+            queue.push(kind);
         }
         queue.orders().to_vec()
     }
@@ -106,7 +120,7 @@ mod tests {
         assert_eq!(ends(&slots), vec![2.0, 5.0, 6.5]);
         assert_eq!(slots[0].start, 0.0);
         assert_eq!(slots[2].start, 5.0);
-        assert_eq!(slots[1].seconds(), 3.0);
+        assert_eq!(slots[1].seconds(), Some(3.0));
     }
 
     #[test]
@@ -145,6 +159,37 @@ mod tests {
         let slots = schedule(&planned(&[Some(8.0), None]), None, Some(6.0));
         assert!(slots[0].late);
         assert!(!slots[1].late);
+    }
+
+    #[test]
+    fn manning_the_catapult_is_open_ended() {
+        let kinds = [
+            OrderKind::Walk(Vec2::ZERO),
+            OrderKind::Man(IVec2::ZERO),
+            OrderKind::Walk(Vec2::ONE),
+        ];
+        let mut planned = planned(&[Some(2.0), Some(1.0), Some(3.0)]);
+        for (planned, order) in planned.iter_mut().zip(orders_of(&kinds)) {
+            planned.order = order;
+        }
+        let slots = schedule(&planned, None, None);
+        assert_eq!(slots[1].start, 2.0);
+        assert_eq!(slots[1].end, f32::INFINITY);
+        assert_eq!(slots[1].seconds(), None);
+        assert_eq!(
+            slots[2].start,
+            f32::INFINITY,
+            "some time after he's called out"
+        );
+        assert_eq!(slots[2].seconds(), None);
+
+        // Waiting for the wave, it takes no time (the plan gives it none), and what's behind it
+        // goes ahead.
+        planned[1].problem = Some(Problem::NoWave);
+        planned[1].walk_seconds = 0.0;
+        planned[1].work_seconds = 0.0;
+        let slots = schedule(&planned, None, None);
+        assert_eq!(ends(&slots), vec![2.0, 2.0, 5.0]);
     }
 
     #[test]

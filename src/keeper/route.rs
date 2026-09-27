@@ -3,7 +3,7 @@
 //! order takes.
 
 use super::nav::{Goal, NavGrid, path_length};
-use super::queue::{Backpack, Order, OrderKind, Problem, plan_wood};
+use super::queue::{Backpack, Order, OrderKind, Phase, Problem, plan_wood};
 use crate::island::TreeId;
 use crate::tuning::KEEPER_SPEED;
 use crate::voxel::TILE_SIZE;
@@ -13,7 +13,8 @@ use std::collections::HashMap;
 /// How close to a tree the keeper stands to chop it.
 const CHOP_STAND_OFF: f32 = 0.2;
 const CHOP_REACH: f32 = 0.3;
-/// How close to a tower's middle the keeper stands to build it (just outside its footprint).
+/// How close to a tower's middle the keeper stands to build, repair or man it (just outside its
+/// footprint).
 const BUILD_STAND_OFF: f32 = 0.47;
 const BUILD_REACH: f32 = 0.45;
 /// When a walk target isn't walkable (e.g. the hearth), get this close to it instead.
@@ -34,7 +35,9 @@ impl TreeLookup for HashMap<TreeId, Vec2> {
 pub fn target_point(kind: &OrderKind, trees: &impl TreeLookup) -> Option<Vec2> {
     match *kind {
         OrderKind::Chop(id) => trees.tree_position(id),
-        OrderKind::Build(cell) => Some(cell.as_vec2() * TILE_SIZE),
+        OrderKind::Build(cell, _) | OrderKind::Repair(cell) | OrderKind::Man(cell) => {
+            Some(cell.as_vec2() * TILE_SIZE)
+        }
         OrderKind::Walk(point) => Some(point),
     }
 }
@@ -52,8 +55,11 @@ pub fn path_for(
     let point = target_point(kind, trees)?;
     let goal = match *kind {
         OrderKind::Chop(_) => Goal::beside(point, CHOP_REACH, CHOP_STAND_OFF),
-        OrderKind::Build(cell) => {
+        OrderKind::Build(cell, _) => {
             nav.block_tower(cell);
+            Goal::beside(point, BUILD_REACH, BUILD_STAND_OFF)
+        }
+        OrderKind::Repair(_) | OrderKind::Man(_) => {
             Goal::beside(point, BUILD_REACH, BUILD_STAND_OFF)
         }
         OrderKind::Walk(_) if nav.is_walkable(point) => Goal::at(point),
@@ -114,13 +120,16 @@ pub enum Progress {
     Started { end: Vec2 },
 }
 
-/// Plans the whole queue: problems, wood and paths for every order. `building` is whether builds
-/// can be started now; during a wave they wait (see [`plan_wood`]).
+/// Plans the whole queue for `phase`: problems, wood and paths for every order. Orders that
+/// belong to the other phase wait (see [`plan_wood`]).
+///
+/// After an open-ended order (manning the catapult) the keeper carries on from where he stood to
+/// get in, once he's called out.
 pub fn plan(
     orders: &[Order],
     progress: Progress,
     backpack: &Backpack,
-    building: bool,
+    phase: Phase,
     nav: &NavGrid,
     trees: &impl TreeLookup,
 ) -> Vec<PlannedOrder> {
@@ -134,7 +143,7 @@ pub fn plan(
         Progress::NotStarted { .. } => None,
     };
     let mut paths = HashMap::new();
-    let steps = plan_wood(orders, backpack, building, started, |order| {
+    let steps = plan_wood(orders, backpack, phase, started, |order| {
         if Some(order.id) == started {
             apply_done(&order.kind, &mut nav, trees);
             return true;
@@ -177,7 +186,7 @@ mod tests {
     use super::*;
     use crate::island::Island;
     use crate::keeper::queue::OrderQueue;
-    use crate::tuning::{BUILD_SECONDS, CHOP_SECONDS};
+    use crate::tuning::{BUILD_SECONDS, CHOP_SECONDS, REPAIR_SECONDS};
 
     const TREE: TreeId = TreeId {
         cell: IVec2::new(-2, -2),
@@ -209,14 +218,14 @@ mod tests {
         let (nav, trees) = setup();
         let queue = queue(&[
             OrderKind::Chop(TREE),
-            OrderKind::Build(IVec2::new(-1, 1)),
+            OrderKind::tower(IVec2::new(-1, 1)),
             OrderKind::Walk(Vec2::new(2.0, 2.0)),
         ]);
         let planned = plan(
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(2),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
@@ -243,15 +252,15 @@ mod tests {
             queue(&through).orders(),
             Progress::NotStarted { keeper: START },
             &backpack(3),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
         let with_tower = plan(
-            queue(&[through[0], OrderKind::Build(site), through[1]]).orders(),
+            queue(&[through[0], OrderKind::tower(site), through[1]]).orders(),
             Progress::NotStarted { keeper: START },
             &backpack(3),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
@@ -273,14 +282,14 @@ mod tests {
     fn skipped_orders_have_no_path_and_dont_move_the_keeper() {
         let (nav, trees) = setup();
         let queue = queue(&[
-            OrderKind::Build(IVec2::new(-1, 1)),
+            OrderKind::tower(IVec2::new(-1, 1)),
             OrderKind::Walk(Vec2::new(2.0, 2.0)),
         ]);
         let planned = plan(
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(0),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
@@ -301,7 +310,7 @@ mod tests {
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(0),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
@@ -319,7 +328,7 @@ mod tests {
             queue.orders(),
             Progress::Started { end },
             &backpack(0),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
@@ -338,7 +347,7 @@ mod tests {
                 keeper: Vec2::new(-2.0, 2.0),
             },
             &backpack(0),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
@@ -354,13 +363,13 @@ mod tests {
         let queue = queue(&[
             OrderKind::Walk(walk_to),
             OrderKind::Chop(TREE),
-            OrderKind::Build(IVec2::new(-1, 1)),
+            OrderKind::tower(IVec2::new(-1, 1)),
         ]);
         let planned = plan(
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(3),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );
@@ -381,14 +390,14 @@ mod tests {
         let (nav, trees) = setup();
         let walk_to = Vec2::new(2.0, 2.0);
         let queue = queue(&[
-            OrderKind::Build(IVec2::new(-1, 1)),
+            OrderKind::tower(IVec2::new(-1, 1)),
             OrderKind::Walk(walk_to),
         ]);
         let planned = plan(
             queue.orders(),
             Progress::NotStarted { keeper: START },
             &backpack(3),
-            false,
+            Phase::Wave,
             &nav,
             &trees,
         );
@@ -400,14 +409,45 @@ mod tests {
     }
 
     #[test]
+    fn repairing_and_manning_stop_beside_the_structure() {
+        let (mut nav, trees) = setup();
+        let cell = IVec2::new(-1, 1);
+        nav.block_tower(cell);
+        let queue = queue(&[
+            OrderKind::Repair(cell),
+            OrderKind::Man(cell),
+            OrderKind::Walk(Vec2::new(2.0, 2.0)),
+        ]);
+        let planned = plan(
+            queue.orders(),
+            Progress::NotStarted { keeper: START },
+            &backpack(0),
+            Phase::Wave,
+            &nav,
+            &trees,
+        );
+        for step in &planned[..2] {
+            assert!(step.problem.is_none());
+            let end = *step.path.last().unwrap();
+            assert!((end.distance(cell.as_vec2()) - BUILD_STAND_OFF).abs() < 1e-4);
+        }
+        assert_eq!(planned[0].work_seconds, REPAIR_SECONDS);
+        assert_eq!(
+            planned[1].work_seconds, 0.0,
+            "manning lasts until he's called out"
+        );
+        assert_eq!(planned[2].path.first(), planned[1].path.last());
+    }
+
+    #[test]
     fn skipped_and_started_orders_take_no_planned_time() {
         let (nav, trees) = setup();
-        let queue = queue(&[OrderKind::Chop(TREE), OrderKind::Build(IVec2::new(-1, 1))]);
+        let queue = queue(&[OrderKind::Chop(TREE), OrderKind::tower(IVec2::new(-1, 1))]);
         let planned = plan(
             queue.orders(),
             Progress::Started { end: START },
             &backpack(0),
-            true,
+            Phase::Preparing,
             &nav,
             &trees,
         );

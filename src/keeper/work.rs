@@ -1,16 +1,18 @@
 //! Carrying out orders: walking the path, swinging the axe or hammer, and what happens when the
-//! work is done.
+//! work is done. Getting into the catapult is handed over to [`super::manning`].
 
-use super::queue::{OrderKind, Problem};
+use super::queue::{Building, OrderKind, Problem};
 use super::{
     Backpack, IncomingLog, Keeper, KeeperAssets, KeeperBody, OrderQueue, Task, TreeIndex, model,
-    nav::NavGrid, route,
+    nav::NavGrid, plan_phase, route,
 };
+use crate::catapult::{Catapult, CatapultAssets, finish_catapult};
 use crate::island::{Felled, Tree};
 use crate::juice::{Burst, Flight, FlightTarget, Landed, Particles, Squash, Tween, Wobble};
 use crate::palette;
-use crate::phase::{GameState, building_allowed};
-use crate::towers::{BuildSite, TowerAssets, finish_site, spawn_site};
+use crate::phase::GameState;
+use crate::slimes::WaveRun;
+use crate::towers::{BuildSite, TowerAssets, TowerWork, finish_tower, spawn_site};
 use crate::tuning::KEEPER_SPEED;
 use crate::ui::{OrderFinished, Popup};
 use crate::voxel::{VOXEL, VoxelMaterial};
@@ -27,7 +29,7 @@ const HEAD_HEIGHT: f32 = 0.7;
 
 pub(super) fn carry_out_orders(
     mut commands: Commands,
-    (time, state): (Res<Time>, Res<State<GameState>>),
+    (time, state, run): (Res<Time>, Res<State<GameState>>, Res<WaveRun>),
     mut queue: ResMut<OrderQueue>,
     mut backpack: ResMut<Backpack>,
     nav: Res<NavGrid>,
@@ -36,17 +38,29 @@ pub(super) fn carry_out_orders(
     body: Single<(Entity, &GlobalTransform), With<KeeperBody>>,
     trees: Query<(Entity, &Tree, &Transform, Option<&Wobble>), Without<Keeper>>,
     sites: Query<&BuildSite>,
+    catapults: Query<(Entity, &Catapult)>,
     mut squashes: Query<&mut Squash>,
-    assets: (Res<KeeperAssets>, Res<TowerAssets>, Res<VoxelMaterial>),
+    assets: (
+        Res<KeeperAssets>,
+        Res<TowerAssets>,
+        Res<CatapultAssets>,
+        Res<VoxelMaterial>,
+    ),
     mut particles: Particles,
-    mut popups: MessageWriter<Popup>,
-    mut finished: MessageWriter<OrderFinished>,
+    (mut popups, mut finished, mut tower_work): (
+        MessageWriter<Popup>,
+        MessageWriter<OrderFinished>,
+        MessageWriter<TowerWork>,
+    ),
 ) {
     let (mut keeper, mut transform) = keeper.into_inner();
     let (body, body_transform) = *body;
-    let (keeper_assets, tower_assets, voxel) = assets;
+    let (keeper_assets, tower_assets, catapult_assets, voxel) = assets;
     let position = transform.translation.xz();
     let head = transform.translation + Vec3::Y * HEAD_HEIGHT;
+    if keeper.task.in_catapult() {
+        return;
+    }
 
     // The player removed the order he was working on.
     if let Some(order) = keeper.task.order()
@@ -72,9 +86,13 @@ pub(super) fn carry_out_orders(
 
     let task = std::mem::take(&mut keeper.task);
     keeper.task = match task {
+        // Handled by `manning`.
+        task @ (Task::Manning { .. } | Task::Leaving { .. }) => task,
+
         Task::Idle => {
-            // During the wave, builds wait: he goes on with the orders behind them.
-            let Some(order) = queue.next_up(building_allowed(*state.get())).copied() else {
+            // Orders for the other phase wait: he goes on with the orders behind them.
+            let phase = plan_phase(*state.get(), run.cleared());
+            let Some(order) = queue.next_up(phase).copied() else {
                 return;
             };
             let problem = backpack.problem(&order.kind);
@@ -87,9 +105,13 @@ pub(super) fn carry_out_orders(
                 Some(path) => {
                     queue.start(order.id);
                     let site = match order.kind {
-                        OrderKind::Build(cell) => {
-                            Some(spawn_site(&mut commands, &tower_assets, &voxel, cell))
-                        }
+                        OrderKind::Build(cell, building) => Some(spawn_site(
+                            &mut commands,
+                            &tower_assets,
+                            &voxel,
+                            cell,
+                            building,
+                        )),
                         _ => None,
                     };
                     Task::Walking {
@@ -149,13 +171,25 @@ pub(super) fn carry_out_orders(
                 }
             } else {
                 let kind = queue.started().map(|started| started.kind);
+                let catapult = |cell| {
+                    catapults
+                        .iter()
+                        .find(|(_, catapult)| catapult.cell == cell)
+                        .map(|(entity, _)| entity)
+                };
                 match kind {
                     Some(kind @ OrderKind::Chop(_)) => {
                         Task::working(order, kind.work_seconds(), CHOP_SWING, site)
                     }
-                    Some(kind @ OrderKind::Build(_)) => {
+                    Some(kind @ (OrderKind::Build(..) | OrderKind::Repair(_))) => {
                         Task::working(order, kind.work_seconds(), HAMMER_SWING, site)
                     }
+                    Some(OrderKind::Man(cell)) if catapult(cell).is_some() => Task::Manning {
+                        order,
+                        catapult: catapult(cell).unwrap(),
+                        stand: at,
+                        board: 0.0,
+                    },
                     _ => {
                         finished.write(OrderFinished(order));
                         queue.finish();
@@ -184,7 +218,7 @@ pub(super) fn carry_out_orders(
                 _ => None,
             };
             let target = match (kind, tree) {
-                (OrderKind::Build(cell), _) => cell.as_vec2(),
+                (OrderKind::Build(cell, _) | OrderKind::Repair(cell), _) => cell.as_vec2(),
                 (_, Some((_, tree, ..))) => tree.position,
                 _ => position,
             };
@@ -218,7 +252,23 @@ pub(super) fn carry_out_orders(
                             },
                         );
                     }
-                    (OrderKind::Build(cell), _, Some(site)) => {
+                    (OrderKind::Repair(cell), ..) => {
+                        tower_work.write(TowerWork::Strike(cell));
+                        particles.burst(
+                            &mut commands,
+                            Vec3::new(cell.x as f32, 0.3, cell.y as f32)
+                                - Vec3::new(toward.x, 0.0, toward.y) * 0.3,
+                            Burst {
+                                colors: &[palette::PLANK, palette::FLAG, palette::GOO],
+                                count: 5,
+                                size: 0.035,
+                                spread: 0.9,
+                                lift: 1.4,
+                                lifetime: 0.45,
+                            },
+                        );
+                    }
+                    (OrderKind::Build(cell, _), _, Some(site)) => {
                         if let Ok(site) = sites.get(site)
                             && let Ok(mut squash) = squashes.get_mut(site.body)
                         {
@@ -260,7 +310,8 @@ pub(super) fn carry_out_orders(
                     &mut backpack,
                     &mut queue,
                     (body, body_transform),
-                    (&keeper_assets, &tower_assets, &voxel),
+                    (&keeper_assets, &tower_assets, &catapult_assets, &voxel),
+                    &mut tower_work,
                 );
                 Task::Idle
             }
@@ -278,7 +329,13 @@ fn finish_order(
     backpack: &mut Backpack,
     queue: &mut OrderQueue,
     (body, body_transform): (Entity, &GlobalTransform),
-    (keeper_assets, tower_assets, voxel): (&KeeperAssets, &TowerAssets, &VoxelMaterial),
+    (keeper_assets, tower_assets, catapult_assets, voxel): (
+        &KeeperAssets,
+        &TowerAssets,
+        &CatapultAssets,
+        &VoxelMaterial,
+    ),
+    tower_work: &mut MessageWriter<TowerWork>,
 ) {
     // Done.
     let wood_before = backpack.wood;
@@ -305,7 +362,7 @@ fn finish_order(
                 .with_spin(9.0),
             ));
         }
-        (OrderKind::Build(cell), _, Some(site)) => {
+        (OrderKind::Build(cell, building), _, Some(site)) => {
             // The wood leaves the backpack and flies onto the site, then the tower drops in.
             let site_top = Vec3::new(cell.x as f32, 0.3, cell.y as f32);
             for (k, slot) in (backpack.wood..wood_before).rev().enumerate() {
@@ -323,7 +380,13 @@ fn finish_order(
                     .with_spin(-8.0),
                 ));
             }
-            finish_site(commands, tower_assets, voxel, site, cell);
+            match building {
+                Building::Tower => finish_tower(commands, tower_assets, voxel, site, cell),
+                Building::Catapult => finish_catapult(commands, catapult_assets, site, cell),
+            }
+        }
+        (OrderKind::Repair(cell), ..) => {
+            tower_work.write(TowerWork::Repaired(cell));
         }
         _ => {}
     }
@@ -348,7 +411,7 @@ impl Task {
 }
 
 impl Keeper {
-    fn face(&mut self, direction: Vec2) {
+    pub(super) fn face(&mut self, direction: Vec2) {
         if direction.length_squared() > 1e-6 {
             self.facing = direction.x.atan2(direction.y);
         }

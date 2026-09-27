@@ -1,18 +1,27 @@
-//! Towers: construction sites while the keeper builds, finished towers dropping into place,
-//! see-through ghosts where towers are planned, and shooting slimes during the wave
-//! ([`shooting`], with the choice of target in [`aim`]).
+//! Towers: construction sites while the keeper builds (towers and the catapult), finished towers
+//! dropping into place, see-through ghosts where buildings are planned, and shooting slimes during
+//! the wave ([`shooting`], with the choice of target in [`aim`]).
+//!
+//! Slimes spit goo at towers near the road ([`health`]): each hit sticks a blob of goo on the
+//! tower, and a tower out of hit points slumps over, broken, and stops shooting. The keeper's
+//! hammer knocks the goo off and sets it straight ([`TowerWork`]).
 
 pub mod aim;
+pub mod health;
 mod shooting;
 
+use crate::catapult;
 use crate::island::cell_to_world;
-use crate::juice::{Burst, Particles, Squash, Tween};
+use crate::juice::{Burst, Particles, Shake, Squash, Tween, Wobble};
+use crate::keeper::Building;
 use crate::palette;
 use crate::phase::GameState;
 use crate::rng::Rng;
-use crate::voxel::{VoxelMaterial, VoxelMesh, shade, vary};
+use crate::ui::Popup;
+use crate::voxel::{VOXEL, VoxelMaterial, VoxelMesh, shade, vary};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
+use health::TowerHealth;
 use shooting::{Archer, Arrow};
 
 /// How high a finished tower drops from.
@@ -25,6 +34,17 @@ const GHOST_GLOW: f32 = 0.35;
 const GHOST_SCALE: f32 = 0.9;
 
 const MODEL_SALT: u64 = 6;
+/// The tower's stepped roof (voxels): where it starts, each step's half width, and their height.
+const ROOF_BOTTOM: f32 = 9.4;
+const ROOF_STEPS: [f32; 4] = [3.9, 2.9, 1.9, 0.9];
+const ROOF_STEP_HEIGHT: f32 = 0.6;
+/// A broken tower leans over this far (radians) and sags.
+const BROKEN_TILT: f32 = 0.24;
+const BROKEN_SAG: f32 = 0.86;
+/// Seconds between a broken tower's creaks, when it shudders and sheds a few chips.
+const CREAK_INTERVAL: f32 = 1.3;
+/// Height above the tower's base for popups.
+const POPUP_HEIGHT: f32 = 1.2;
 
 pub struct TowersPlugin;
 
@@ -32,6 +52,8 @@ impl Plugin for TowersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelMaterial>()
             .init_resource::<TowerAssets>()
+            .add_message::<TowerHit>()
+            .add_message::<TowerWork>()
             .add_systems(OnExit(GameState::GameOver), clear_towers)
             .add_systems(
                 Update,
@@ -40,23 +62,47 @@ impl Plugin for TowersPlugin {
                     bob_ghosts,
                     shooting::shoot.run_if(in_state(GameState::Wave)),
                     shooting::fly_arrows,
+                    (take_spits, do_tower_work, creak_broken_towers).chain(),
                 ),
             );
     }
 }
 
-/// A finished tower.
+/// A finished tower. `body` is the child with the model, which squashes, tilts and gets goo on it.
 #[derive(Component, Debug)]
 pub struct Tower {
     pub cell: IVec2,
+    pub body: Entity,
+    pub health: TowerHealth,
 }
 
-/// A tower being built. `body` is the child that squashes when hammered.
+/// A building going up. `body` is the child that squashes when hammered.
 #[derive(Component, Debug)]
 pub struct BuildSite {
     pub cell: IVec2,
     pub body: Entity,
+    pub building: Building,
 }
+
+/// Goo that landed on a tower (at this world point, spat from `from`).
+#[derive(Message, Clone, Copy, Debug)]
+pub struct TowerHit {
+    pub tower: Entity,
+    pub at: Vec3,
+}
+
+/// The keeper working on the tower on a cell.
+#[derive(Message, Clone, Copy, Debug)]
+pub enum TowerWork {
+    /// A hammer strike while repairing.
+    Strike(IVec2),
+    /// The repair is done.
+    Repaired(IVec2),
+}
+
+/// A blob of goo stuck on a tower.
+#[derive(Component, Debug)]
+struct Goo;
 
 /// A see-through preview of a planned tower.
 #[derive(Component, Debug)]
@@ -74,6 +120,8 @@ pub struct TowerAssets {
     site: Handle<Mesh>,
     /// The tower's shape without its colors, for blueprint-style ghosts.
     ghost: Handle<Mesh>,
+    catapult_ghost: Handle<Mesh>,
+    goo: Handle<Mesh>,
     ghost_ok: Handle<StandardMaterial>,
     ghost_problem: Handle<StandardMaterial>,
     arrow: Handle<Mesh>,
@@ -89,6 +137,10 @@ impl FromWorld for TowerAssets {
         let mut ghost = tower_mesh().build();
         ghost.remove_attribute(Mesh::ATTRIBUTE_COLOR);
         let ghost = meshes.add(ghost);
+        let mut catapult_ghost = catapult::model::ghost_mesh().build();
+        catapult_ghost.remove_attribute(Mesh::ATTRIBUTE_COLOR);
+        let catapult_ghost = meshes.add(catapult_ghost);
+        let goo = meshes.add(goo_mesh().build());
         let voxel = world.resource::<VoxelMaterial>().0.clone();
         // Solid, softly glowing blueprints: see-through ghosts of a mesh made of overlapping
         // boxes show every inner face and turn into a smear.
@@ -106,6 +158,8 @@ impl FromWorld for TowerAssets {
             tower,
             site,
             ghost,
+            catapult_ghost,
+            goo,
             ghost_ok: blueprint(palette::BLUEPRINT),
             ghost_problem: blueprint(palette::BLUEPRINT_PROBLEM),
             arrow,
@@ -114,12 +168,13 @@ impl FromWorld for TowerAssets {
     }
 }
 
-/// Starts a construction site on `cell`.
+/// Starts a construction site for `building` on `cell`.
 pub fn spawn_site(
     commands: &mut Commands,
     assets: &TowerAssets,
     voxel: &VoxelMaterial,
     cell: IVec2,
+    building: Building,
 ) -> Entity {
     let pop = Tween::pop_in(Vec3::ONE, 0.0);
     let root = commands
@@ -141,12 +196,16 @@ pub fn spawn_site(
             ChildOf(root),
         ))
         .id();
-    commands.entity(root).insert(BuildSite { cell, body });
+    commands.entity(root).insert(BuildSite {
+        cell,
+        body,
+        building,
+    });
     root
 }
 
 /// Replaces a finished site with a tower that drops into place.
-pub fn finish_site(
+pub fn finish_tower(
     commands: &mut Commands,
     assets: &TowerAssets,
     voxel: &VoxelMaterial,
@@ -156,12 +215,7 @@ pub fn finish_site(
     commands.entity(site).despawn();
     let drop = Tween::drop_in(cell_to_world(cell), DROP_HEIGHT, DROP_DELAY);
     let root = commands
-        .spawn((
-            Tower { cell },
-            drop.start_transform(),
-            Visibility::Hidden,
-            drop,
-        ))
+        .spawn((drop.start_transform(), Visibility::Hidden, drop))
         .id();
     let body = commands
         .spawn((
@@ -172,17 +226,35 @@ pub fn finish_site(
             ChildOf(root),
         ))
         .id();
-    commands
-        .entity(root)
-        .insert((Landing { body }, Archer::new(body)));
+    commands.entity(root).insert((
+        Tower {
+            cell,
+            body,
+            health: TowerHealth::default(),
+        },
+        Landing { body },
+        Archer::new(body),
+    ));
 }
 
-/// A ghost tower on `cell`, red if the plan says it can't be built. Pops in from nothing.
-pub fn ghost_bundle(assets: &TowerAssets, cell: IVec2, problem: bool) -> impl Bundle {
-    let pop = Tween::pop_in(Vec3::splat(GHOST_SCALE), 0.0);
+/// A ghost of `building` on `cell`, red if the plan says it can't be built. Pops in from nothing.
+pub fn ghost_bundle(
+    assets: &TowerAssets,
+    cell: IVec2,
+    building: Building,
+    problem: bool,
+) -> impl Bundle {
+    let (mesh, scale) = match building {
+        Building::Tower => (assets.ghost.clone(), GHOST_SCALE),
+        Building::Catapult => (
+            assets.catapult_ghost.clone(),
+            GHOST_SCALE * catapult::model::SCALE,
+        ),
+    };
+    let pop = Tween::pop_in(Vec3::splat(scale), 0.0);
     (
         Ghost,
-        Mesh3d(assets.ghost.clone()),
+        Mesh3d(mesh),
         MeshMaterial3d(ghost_material(assets, problem)),
         Transform {
             translation: cell_to_world(cell),
@@ -199,6 +271,245 @@ pub fn ghost_material(assets: &TowerAssets, problem: bool) -> Handle<StandardMat
         assets.ghost_problem.clone()
     } else {
         assets.ghost_ok.clone()
+    }
+}
+
+/// Where goo spat from the direction `toward` (world x/z, from the tower) sticks on a tower, in
+/// the tower's own space: mostly splattered anywhere on the stepped roof, where it shows from
+/// above, otherwise somewhere solid on the side facing the slime (the lookout's railing, a corner
+/// post, the stone base).
+pub fn goo_spot(toward: Vec2, rng: &mut Rng) -> Vec3 {
+    let (normal, across) = if toward.x.abs() > toward.y.abs() {
+        (Vec3::X * toward.x.signum(), Vec3::Z)
+    } else {
+        (Vec3::Z * toward.y.signum(), Vec3::X)
+    };
+    let side = if rng.chance(0.5) { 1.0 } else { -1.0 };
+    if rng.chance(0.6) {
+        let (x, z) = (rng.range(-3.2, 3.2), rng.range(-3.2, 3.2));
+        let steps = ROOF_STEPS
+            .iter()
+            .filter(|&&half| x.abs().max(z.abs()) <= half)
+            .count();
+        let top = ROOF_BOTTOM + ROOF_STEP_HEIGHT * steps as f32;
+        return Vec3::new(x, top + 0.3, z) * VOXEL;
+    }
+    // (distance out from the middle, height, where across the side), in voxels.
+    let (out, height, lateral) = match rng.index(3) {
+        0 => (3.5, rng.range(7.0, 8.0), rng.range(-2.8, 2.8)),
+        1 => (2.7, rng.range(1.8, 6.2), 2.2 * side),
+        _ => (3.3, rng.range(0.4, 1.3), rng.range(-2.4, 2.4)),
+    };
+    (normal * out + across * lateral + Vec3::Y * height) * VOXEL
+}
+
+/// Goo lands on a tower: it sticks, the tower shudders, and if that was the last hit point it
+/// slumps over, broken.
+fn take_spits(
+    mut commands: Commands,
+    mut hits: MessageReader<TowerHit>,
+    mut towers: Query<(&mut Tower, &GlobalTransform)>,
+    mut bodies: Query<(
+        &mut Squash,
+        &Transform,
+        &GlobalTransform,
+        Option<&mut Wobble>,
+    )>,
+    assets: Res<TowerAssets>,
+    mut shake: ResMut<Shake>,
+    mut particles: Particles,
+    mut popups: MessageWriter<Popup>,
+) {
+    for hit in hits.read() {
+        let Ok((mut tower, global)) = towers.get_mut(hit.tower) else {
+            continue;
+        };
+        let broke = tower.health.damage(crate::tuning::SPIT_DAMAGE);
+        let Ok((mut squash, transform, body_global, wobble)) = bodies.get_mut(tower.body) else {
+            continue;
+        };
+        let local = body_global.affine().inverse().transform_point3(hit.at);
+        commands.spawn((
+            Goo,
+            Mesh3d(assets.goo.clone()),
+            MeshMaterial3d(assets.voxel.clone()),
+            Transform::from_translation(local),
+            Visibility::Hidden,
+            Tween::pop_in(Vec3::ONE, 0.0),
+            ChildOf(tower.body),
+        ));
+        particles.burst(
+            &mut commands,
+            hit.at,
+            Burst {
+                colors: &[palette::GOO, palette::SLIME],
+                count: 6,
+                size: 0.04,
+                spread: 0.8,
+                lift: 1.0,
+                lifetime: 0.5,
+            },
+        );
+        let away = (global.translation() - hit.at)
+            .with_y(0.0)
+            .normalize_or(Vec3::X);
+        let axis = Vec3::Y.cross(away);
+        if broke {
+            // It slumps over away from the goo, sagging.
+            squash.rest = Vec3::new(1.0, BROKEN_SAG, 1.0);
+            squash.pulse(-0.3);
+            let tilt = Quat::from_axis_angle(axis, BROKEN_TILT);
+            let mut slumped = *transform;
+            slumped.rotation = tilt;
+            let mut shudder = Wobble::new(None, &slumped, axis, 0.12);
+            shudder.rest = tilt;
+            commands.entity(tower.body).insert(shudder);
+            shake.add(0.3);
+            particles.burst(
+                &mut commands,
+                global.translation() + Vec3::Y * 0.7,
+                Burst {
+                    colors: &[palette::PLANK, palette::ROOF, palette::HEARTH_STONE],
+                    count: 16,
+                    size: 0.05,
+                    spread: 1.4,
+                    lift: 1.8,
+                    lifetime: 0.8,
+                },
+            );
+            popups.write(Popup::problem(
+                global.translation() + Vec3::Y * POPUP_HEIGHT,
+                "Tower broken!",
+            ));
+        } else {
+            squash.pulse(-0.12);
+            let mut shudder = Wobble::new(wobble.as_deref(), transform, axis, 0.06);
+            if let Some(existing) = wobble {
+                shudder.rest = existing.rest;
+            }
+            commands.entity(tower.body).insert(shudder);
+        }
+    }
+}
+
+/// The keeper's hammer knocks goo off a tower, and a finished repair sets it straight.
+fn do_tower_work(
+    mut commands: Commands,
+    mut work: MessageReader<TowerWork>,
+    mut towers: Query<(&mut Tower, &GlobalTransform)>,
+    mut bodies: Query<(&mut Squash, &Transform, Option<&Children>)>,
+    goo: Query<&GlobalTransform, With<Goo>>,
+    mut particles: Particles,
+    mut popups: MessageWriter<Popup>,
+) {
+    for work in work.read() {
+        let cell = match *work {
+            TowerWork::Strike(cell) | TowerWork::Repaired(cell) => cell,
+        };
+        let Some((mut tower, global)) = towers.iter_mut().find(|(tower, _)| tower.cell == cell)
+        else {
+            continue;
+        };
+        let Ok((mut squash, transform, children)) = bodies.get_mut(tower.body) else {
+            continue;
+        };
+        let blobs: Vec<(Entity, Vec3)> = children
+            .into_iter()
+            .flatten()
+            .filter_map(|&child| Some((child, goo.get(child).ok()?.translation())))
+            .collect();
+        let knocked_off = match *work {
+            TowerWork::Strike(_) => {
+                squash.pulse(-0.14);
+                // Each strike knocks off a blob of goo.
+                blobs.into_iter().take(1).collect::<Vec<_>>()
+            }
+            TowerWork::Repaired(_) => {
+                tower.health.repair();
+                squash.rest = Vec3::ONE;
+                squash.pulse(0.3);
+                let upright = Transform {
+                    rotation: Quat::IDENTITY,
+                    ..*transform
+                };
+                let mut settle = Wobble::new(None, &upright, Vec3::X, 0.1);
+                settle.rest = Quat::IDENTITY;
+                commands.entity(tower.body).insert(settle);
+                particles.burst(
+                    &mut commands,
+                    global.translation() + Vec3::Y * 0.9,
+                    Burst {
+                        colors: &[palette::FLAG, palette::UI_PAPER, palette::ORDER_REPAIR],
+                        count: 14,
+                        size: 0.04,
+                        spread: 1.2,
+                        lift: 2.2,
+                        lifetime: 0.8,
+                    },
+                );
+                popups.write(Popup::new(
+                    global.translation() + Vec3::Y * POPUP_HEIGHT,
+                    "Repaired!",
+                    palette::ORDER_REPAIR,
+                ));
+                blobs
+            }
+        };
+        for (blob, at) in knocked_off {
+            commands.entity(blob).despawn();
+            particles.burst(
+                &mut commands,
+                at,
+                Burst {
+                    colors: &[palette::GOO, palette::SLIME],
+                    count: 5,
+                    size: 0.04,
+                    spread: 1.0,
+                    lift: 1.4,
+                    lifetime: 0.5,
+                },
+            );
+        }
+    }
+}
+
+/// Broken towers creak now and then, shuddering and shedding chips, so they stand out.
+fn creak_broken_towers(
+    mut commands: Commands,
+    time: Res<Time>,
+    towers: Query<(&Tower, &GlobalTransform)>,
+    bodies: Query<(&Transform, Option<&Wobble>)>,
+    mut particles: Particles,
+    mut since: Local<f32>,
+) {
+    *since += time.delta_secs();
+    if *since < CREAK_INTERVAL {
+        return;
+    }
+    *since = 0.0;
+    for (tower, global) in &towers {
+        if !tower.health.is_broken() {
+            continue;
+        }
+        if let Ok((transform, wobble)) = bodies.get(tower.body) {
+            let mut creak = Wobble::new(wobble, transform, Vec3::Y, 0.05);
+            if let Some(existing) = wobble {
+                creak.rest = existing.rest;
+            }
+            commands.entity(tower.body).insert(creak);
+        }
+        particles.burst(
+            &mut commands,
+            global.translation() + Vec3::Y * 0.9,
+            Burst {
+                colors: &[palette::PLANK, palette::ROOF, palette::GOO],
+                count: 3,
+                size: 0.035,
+                spread: 0.6,
+                lift: 0.6,
+                lifetime: 0.7,
+            },
+        );
     }
 }
 
@@ -322,7 +633,7 @@ fn tower_mesh() -> VoxelMesh {
     }
 
     // Corner poles holding a stepped roof.
-    let roof_bottom = rail_bottom + 2.0;
+    let roof_bottom = ROOF_BOTTOM;
     for (x, z) in [(-3.2, -3.2), (2.8, -3.2), (-3.2, 2.8), (2.8, 2.8)] {
         mesh.cuboid(
             Vec3::new(x, rail_bottom, z),
@@ -330,7 +641,7 @@ fn tower_mesh() -> VoxelMesh {
             palette::BARK,
         );
     }
-    let tiers = [(3.9, 0.6), (2.9, 0.6), (1.9, 0.6), (0.9, 0.6)];
+    let tiers = ROOF_STEPS.map(|half| (half, ROOF_STEP_HEIGHT));
     let mut bottom = roof_bottom;
     for (k, (half, height)) in tiers.into_iter().enumerate() {
         let t = k as f32 / (tiers.len() - 1) as f32;
@@ -362,6 +673,28 @@ fn tower_mesh() -> VoxelMesh {
     mesh
 }
 
+/// A blob of goo, dripping.
+fn goo_mesh() -> VoxelMesh {
+    let mut mesh = VoxelMesh::default();
+    let shine = palette::GOO.mix(&Color::WHITE, 0.5);
+    mesh.cuboid(
+        Vec3::new(-0.7, -0.5, -0.7),
+        Vec3::new(0.7, 0.5, 0.7),
+        palette::GOO,
+    );
+    mesh.cuboid(
+        Vec3::new(-0.3, -1.2, -0.3),
+        Vec3::new(0.3, -0.5, 0.3),
+        palette::GOO,
+    );
+    mesh.cuboid(
+        Vec3::new(-0.45, 0.3, -0.45),
+        Vec3::new(0.0, 0.6, 0.0),
+        shine,
+    );
+    mesh
+}
+
 /// A construction site: foundation stones, corner posts and a stack of planks.
 fn site_mesh() -> VoxelMesh {
     let mut rng = Rng::new(MODEL_SALT + 1);
@@ -389,4 +722,23 @@ fn site_mesh() -> VoxelMesh {
         );
     }
     mesh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn goo_sticks_on_the_tower() {
+        let mut rng = Rng::new(1);
+        let roof_top = ROOF_BOTTOM + ROOF_STEP_HEIGHT * ROOF_STEPS.len() as f32;
+        for _ in 0..500 {
+            let spot = goo_spot(Vec2::new(-1.0, 0.3), &mut rng) / VOXEL;
+            assert!(spot.x.abs() <= 3.6 && spot.z.abs() <= 3.6, "{spot:?}");
+            assert!(spot.y > 0.0 && spot.y <= roof_top + 0.5, "{spot:?}");
+            if spot.y < ROOF_BOTTOM {
+                assert!(spot.x < 0.0, "on the side facing the slime: {spot:?}");
+            }
+        }
+    }
 }

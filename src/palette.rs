@@ -69,11 +69,15 @@ pub const ROOF_TOP: Color = Color::srgb_u8(0x5A, 0x9A, 0xC8);
 pub const FLAG: Color = Color::srgb_u8(0xF4, 0xC8, 0x4A);
 pub const BLUEPRINT: Color = Color::srgb_u8(0xC4, 0xE0, 0xFF);
 pub const BLUEPRINT_PROBLEM: Color = Color::srgb_u8(0xFF, 0xB4, 0xA8);
+pub const ROPE: Color = Color::srgb_u8(0xE2, 0xCC, 0x9A);
+pub const BOULDER: Color = Color::srgb_u8(0x9A, 0x92, 0x9E);
 
 // Enemies.
 pub const SLIME: Color = Color::srgb_u8(0xA0, 0x84, 0xE8);
 /// Flags builds that wait for the wave to end: a deeper slime lilac that reads on paper.
 pub const WAVE_HOLD: Color = Color::srgb_u8(0x84, 0x64, 0xD4);
+/// Goo slimes spit at towers: a little greener and glossier than the slimes themselves.
+pub const GOO: Color = Color::srgb_u8(0xB4, 0x9C, 0xF0);
 
 // The prepare phase and the bell.
 pub const BRASS: Color = Color::srgb_u8(0xE6, 0xA8, 0x3E);
@@ -84,6 +88,8 @@ pub const ROUTE: Color = Color::srgb_u8(0xFF, 0xF6, 0xE4);
 pub const ORDER_CHOP: Color = Color::srgb_u8(0xE8, 0x9A, 0x3C);
 pub const ORDER_BUILD: Color = Color::srgb_u8(0x6C, 0xB8, 0x5C);
 pub const ORDER_WALK: Color = Color::srgb_u8(0x7C, 0xA8, 0xDC);
+pub const ORDER_REPAIR: Color = Color::srgb_u8(0x3E, 0xA8, 0x9C);
+pub const ORDER_CATAPULT: Color = Color::srgb_u8(0xCC, 0x5C, 0x8E);
 pub const PROBLEM: Color = Color::srgb_u8(0xE0, 0x4A, 0x3E);
 
 // UI.

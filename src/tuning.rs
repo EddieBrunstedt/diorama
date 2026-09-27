@@ -19,6 +19,12 @@ pub const WOOD_PER_TREE: u32 = 1;
 /// Seconds to build a tower, once the keeper is standing next to the site.
 pub const BUILD_SECONDS: f32 = 4.0;
 pub const TOWER_WOOD_COST: u32 = 3;
+/// Seconds to build the catapult, and its cost. The island has room for one.
+pub const CATAPULT_BUILD_SECONDS: f32 = 6.0;
+pub const CATAPULT_WOOD_COST: u32 = 4;
+
+/// Seconds of hammering to repair a tower, however badly it's hurt. Repairs cost no wood.
+pub const REPAIR_SECONDS: f32 = 3.0;
 
 /// Most orders the queue can hold.
 pub const MAX_ORDERS: usize = 12;
@@ -56,6 +62,34 @@ pub const TOWER_COOLDOWN: f32 = 0.8;
 pub const TOWER_DAMAGE: u32 = 1;
 /// Arrow speed in tiles per second.
 pub const ARROW_SPEED: f32 = 5.0;
+/// A tower's hit points. At 0 it's broken: it stops shooting until the keeper repairs it.
+/// Damage stays from one wave to the next.
+pub const TOWER_HP: u32 = 6;
+
+/// Slimes spit goo at towers this close to them (tiles from the tower's middle), so towers next
+/// to the road get hurt and towers a tile further back don't.
+pub const SPIT_REACH: f32 = 1.2;
+/// Seconds between a slime's spits, and the damage each one does.
+pub const SPIT_COOLDOWN: f32 = 3.0;
+pub const SPIT_DAMAGE: u32 = 1;
+
+/// Seconds of holding to charge the catapult fully. Letting go below `CATAPULT_MIN_CHARGE`
+/// (a fraction of full) fires nothing.
+pub const CATAPULT_CHARGE_SECONDS: f32 = 1.1;
+pub const CATAPULT_MIN_CHARGE: f32 = 0.2;
+/// Seconds to wind the arm back and load a new boulder after a shot.
+pub const CATAPULT_RELOAD_SECONDS: f32 = 2.4;
+/// How far the catapult throws, in tiles from its middle, and how close it can't reach.
+pub const CATAPULT_RANGE: f32 = 3.6;
+pub const CATAPULT_MIN_RANGE: f32 = 0.9;
+/// Damage and splash radius (tiles) of a shot at the least and at full charge.
+pub const CATAPULT_DAMAGE_MIN: u32 = 1;
+pub const CATAPULT_DAMAGE_MAX: u32 = 4;
+pub const CATAPULT_SPLASH_MIN: f32 = 0.22;
+pub const CATAPULT_SPLASH_MAX: f32 = 0.5;
+/// Boulder flight time: a base plus more per tile thrown.
+pub const BOULDER_FLIGHT_SECONDS: f32 = 0.55;
+pub const BOULDER_FLIGHT_PER_TILE: f32 = 0.1;
 
 /// Tiles offered after each survived wave; the player picks one.
 pub const OFFER_SIZE: usize = 3;

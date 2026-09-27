@@ -1,7 +1,7 @@
-//! Showing the plan on the island: a dotted route through the queued orders, and ghost towers
-//! where towers are planned.
+//! Showing the plan on the island: a dotted route through the queued orders, and ghosts where
+//! towers and the catapult are planned.
 
-use super::{Keeper, OrderKind, OrderQueue, Plan};
+use super::{Building, Keeper, OrderKind, OrderQueue, Plan};
 use crate::juice::Particles;
 use crate::palette;
 use crate::towers::{Ghost, TowerAssets, ghost_bundle, ghost_material};
@@ -102,42 +102,42 @@ pub(super) fn draw_route(
     }
 }
 
-/// Keeps a ghost tower on every planned build that hasn't started yet.
+/// Keeps a ghost on every planned build that hasn't started yet.
 pub(super) fn sync_ghosts(
     mut commands: Commands,
     plan: Res<Plan>,
     queue: Res<OrderQueue>,
     assets: Res<TowerAssets>,
-    mut ghosts: Local<HashMap<IVec2, Entity>>,
+    mut ghosts: Local<HashMap<(IVec2, Building), Entity>>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>, With<Ghost>>,
 ) {
     if !plan.is_changed() {
         return;
     }
     let started = queue.started().map(|order| order.id);
-    let wanted: HashMap<IVec2, bool> = plan
+    let wanted: HashMap<(IVec2, Building), bool> = plan
         .orders
         .iter()
         .filter(|planned| Some(planned.order.id) != started)
         .filter_map(|planned| match planned.order.kind {
             // A build waiting for the wave to end will still happen, so its ghost stays blue.
-            OrderKind::Build(cell) => Some((
-                cell,
+            OrderKind::Build(cell, building) => Some((
+                (cell, building),
                 planned.problem.is_some_and(|problem| !problem.holds()),
             )),
             _ => None,
         })
         .collect();
 
-    ghosts.retain(|cell, entity| {
-        let keep = wanted.contains_key(cell);
+    ghosts.retain(|key, entity| {
+        let keep = wanted.contains_key(key);
         if !keep {
             commands.entity(*entity).despawn();
         }
         keep
     });
-    for (&cell, &problem) in &wanted {
-        match ghosts.get(&cell) {
+    for (&(cell, building), &problem) in &wanted {
+        match ghosts.get(&(cell, building)) {
             Some(&entity) => {
                 if let Ok(mut material) = materials.get_mut(entity) {
                     let want = ghost_material(&assets, problem);
@@ -147,8 +147,10 @@ pub(super) fn sync_ghosts(
                 }
             }
             None => {
-                let entity = commands.spawn(ghost_bundle(&assets, cell, problem)).id();
-                ghosts.insert(cell, entity);
+                let entity = commands
+                    .spawn(ghost_bundle(&assets, cell, building, problem))
+                    .id();
+                ghosts.insert((cell, building), entity);
             }
         }
     }

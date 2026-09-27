@@ -7,11 +7,13 @@ use super::{
     wood_label,
 };
 use crate::camera::DioramaCamera;
+use crate::catapult::CatapultAim;
+use crate::catapult::shot::{Loader, shot};
 use crate::dev::ScriptedCursor;
 use crate::hearth::HearthHealth;
 use crate::keeper::{
-    Aim, AimPreview, Backpack, IncomingLog, OrderId, OrderKind, OrderQueue, Plan, Problem,
-    Timeline, cursor_position, shown_wood,
+    Aim, AimPreview, Backpack, BuildChoice, Building, IncomingLog, OrderId, OrderKind, OrderQueue,
+    Plan, Problem, Timeline, cursor_position, shown_wood,
 };
 use crate::offer::{Placement, TileOffer};
 use crate::palette;
@@ -31,6 +33,8 @@ const MARKER_SIZE: f32 = 24.0;
 /// Height above an order's target where its numbered marker floats.
 const CHOP_MARKER_HEIGHT: f32 = 0.85;
 const BUILD_MARKER_HEIGHT: f32 = 0.8;
+const REPAIR_MARKER_HEIGHT: f32 = 1.1;
+const CATAPULT_MARKER_HEIGHT: f32 = 0.75;
 const WALK_MARKER_HEIGHT: f32 = 0.3;
 
 #[derive(Component)]
@@ -338,7 +342,9 @@ pub(super) fn animate_popups(
 fn marker_height(kind: &OrderKind) -> f32 {
     match kind {
         OrderKind::Chop(_) => CHOP_MARKER_HEIGHT,
-        OrderKind::Build(_) => BUILD_MARKER_HEIGHT,
+        OrderKind::Build(_, Building::Tower) => BUILD_MARKER_HEIGHT,
+        OrderKind::Build(_, Building::Catapult) | OrderKind::Man(_) => CATAPULT_MARKER_HEIGHT,
+        OrderKind::Repair(_) => REPAIR_MARKER_HEIGHT,
         OrderKind::Walk(_) => WALK_MARKER_HEIGHT,
     }
 }
@@ -472,15 +478,16 @@ pub(super) fn update_cursor_label(
     timeline: Res<Timeline>,
     preview: Res<AimPreview>,
     backpack: Res<Backpack>,
-    offer: Res<TileOffer>,
-    placement: Res<Placement>,
+    (offer, placement): (Res<TileOffer>, Res<Placement>),
+    (choice, catapult): (Res<BuildChoice>, Res<CatapultAim>),
     label: Single<(&CursorLabel, &mut Node, &ComputedNode)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     let (label, mut node, computed) = label.into_inner();
     let cursor = cursor_position(&window, scripted.as_deref());
     let placing = placement.hover.filter(|_| offer.placing().is_some());
-    let shown = aim.target.is_some() || placing.is_some();
+    let aiming = catapult.manned && catapult.target.is_some();
+    let shown = aim.target.is_some() || placing.is_some() || aiming;
     let Some(cursor) = cursor.filter(|_| shown) else {
         if node.display != Display::None {
             node.display = Display::None;
@@ -523,6 +530,31 @@ pub(super) fn update_cursor_label(
         return;
     }
     let Some(target) = aim.target else {
+        // In the catapult: how the shot is coming along.
+        let charge = catapult.loader.charge();
+        let (title, time) = match catapult.loader {
+            Loader::Ready => (
+                "Hold to charge".to_string(),
+                format!("Up to {} damage", shot(1.0).damage),
+            ),
+            Loader::Charging { .. } if charge >= 1.0 => (
+                "Let go to throw!".to_string(),
+                format!("{} damage, full splash", shot(charge).damage),
+            ),
+            Loader::Charging { .. } => (
+                format!("Charging {:.0}%", charge * 100.0),
+                format!("{} damage", shot(charge).damage),
+            ),
+            Loader::Reloading { .. } => ("Reloading...".to_string(), String::new()),
+        };
+        let warning = if catapult.past_edge {
+            "Past the island's edge"
+        } else if catapult.clamped {
+            "Out of reach"
+        } else {
+            ""
+        };
+        set_texts(title, time, warning.to_string(), palette::UI_INK_SOFT);
         return;
     };
 
@@ -530,7 +562,13 @@ pub(super) fn update_cursor_label(
     let preview = preview.get(&timeline);
     let time = preview
         .filter(|(planned, _)| planned.problem.is_none())
-        .map(|(_, slot)| format!("Takes {}", format_seconds(slot.seconds())))
+        .map(|(planned, _)| {
+            if planned.order.kind.open_ended() {
+                "Stays in until you call him out".to_string()
+            } else {
+                format!("Takes {}", format_seconds(planned.seconds()))
+            }
+        })
         .unwrap_or_default();
     let mut warning_color = palette::PROBLEM;
     let (title, warning) = if let Some(existing) = queue.find_same_target(&target.kind) {
@@ -555,8 +593,12 @@ pub(super) fn update_cursor_label(
             wood: wood_then,
             capacity: backpack.capacity,
         };
+        let catapult_taken =
+            matches!(target.kind, OrderKind::Build(_, Building::Catapult)) && choice.catapult_taken;
         let warning = if queue.is_full() {
             "Too many orders".to_string()
+        } else if catapult_taken {
+            "Only room for one catapult".to_string()
         } else {
             let problem = preview
                 .and_then(|(planned, _)| planned.problem)

@@ -1,6 +1,7 @@
 //! Tiny pixel-art icons drawn from ASCII maps in code, shown crisp at a whole-number scale.
 
 use crate::island::TileKind;
+use crate::keeper::{Building, OrderKind};
 use crate::palette;
 use bevy::{
     asset::RenderAssetUsages,
@@ -37,6 +38,36 @@ const TOWER: &[&str] = &[
     "..oWwwwwWo..",
     ".osssssssso.",
     ".oooooooooo.",
+];
+
+const CATAPULT: &[&str] = &[
+    ".......ooo..",
+    "......ossSo.",
+    "......osSSo.",
+    ".....owooo..",
+    "....owo.....",
+    "...owo...o..",
+    "..owo...owo.",
+    ".owo....owo.",
+    "oooooooooooo",
+    "owwwwwwwwwwo",
+    ".oBBo..oBBo.",
+    "..oo....oo..",
+];
+
+const REPAIR: &[&str] = &[
+    "............",
+    "..ooooooo...",
+    ".oiiiiiiio..",
+    ".oicciiiio..",
+    ".oiiiiiiio..",
+    "..oooHooo...",
+    "....oHHo..f.",
+    "....oHHo.fff",
+    "....oHHo..f.",
+    "....oHHo....",
+    "....oHHo....",
+    "....oooo....",
 ];
 
 const BOOT: &[&str] = &[
@@ -196,6 +227,8 @@ pub struct Icons {
     pub chop: Handle<Image>,
     pub build: Handle<Image>,
     pub walk: Handle<Image>,
+    pub catapult: Handle<Image>,
+    pub repair: Handle<Image>,
     pub wood: Handle<Image>,
     pub bell: Handle<Image>,
     pub hourglass: Handle<Image>,
@@ -208,6 +241,24 @@ pub struct Icons {
 }
 
 impl Icons {
+    /// The icon on an order's card.
+    pub fn order(&self, kind: &OrderKind) -> Handle<Image> {
+        match kind {
+            OrderKind::Chop(_) => self.chop.clone(),
+            OrderKind::Build(_, building) => self.building(*building),
+            OrderKind::Repair(_) => self.repair.clone(),
+            OrderKind::Man(_) => self.catapult.clone(),
+            OrderKind::Walk(_) => self.walk.clone(),
+        }
+    }
+
+    pub fn building(&self, building: Building) -> Handle<Image> {
+        match building {
+            Building::Tower => self.build.clone(),
+            Building::Catapult => self.catapult.clone(),
+        }
+    }
+
     pub fn tile(&self, kind: TileKind) -> Handle<Image> {
         match kind {
             TileKind::Forest => self.forest_tile.clone(),
@@ -224,6 +275,8 @@ impl FromWorld for Icons {
             chop: images.add(pixel_art(TREE)),
             build: images.add(pixel_art(TOWER)),
             walk: images.add(pixel_art(BOOT)),
+            catapult: images.add(pixel_art(CATAPULT)),
+            repair: images.add(pixel_art(REPAIR)),
             wood: images.add(pixel_art(LOG)),
             bell: images.add(pixel_art(BELL)),
             hourglass: images.add(pixel_art(HOURGLASS)),
@@ -273,6 +326,8 @@ fn pixel_color(key: char) -> Option<Color> {
         'u' => palette::DIRT,
         'U' => palette::DIRT_DARK,
         'D' => crate::voxel::shade(palette::ROAD, 0.85),
+        'i' => palette::TOOL_METAL,
+        'H' => palette::TOOL_HANDLE,
         _ => return None,
     })
 }
@@ -312,6 +367,8 @@ mod tests {
         for icon in [
             TREE,
             TOWER,
+            CATAPULT,
+            REPAIR,
             BOOT,
             LOG,
             BELL,
