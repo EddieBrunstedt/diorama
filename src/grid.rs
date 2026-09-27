@@ -13,12 +13,22 @@ pub enum Terrain {
     Ground,
     /// Impassable, and nothing can be built on it.
     Rock,
+    /// Where the horde comes out. The horde walks over it, but nothing can be built on it.
+    Nest,
 }
 
 impl Terrain {
     pub fn buildable(self) -> bool {
         match self {
             Terrain::Ground => true,
+            Terrain::Rock | Terrain::Nest => false,
+        }
+    }
+
+    /// Whether ground enemies can walk over it (structures on it aside).
+    pub fn walkable(self) -> bool {
+        match self {
+            Terrain::Ground | Terrain::Nest => true,
             Terrain::Rock => false,
         }
     }
@@ -28,6 +38,46 @@ impl Terrain {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Structure {
     Wall,
+    /// Part of the Command Center: what the horde is after. It's there from the start and can't
+    /// be removed.
+    CommandCenter,
+}
+
+impl Structure {
+    /// Whether the player can remove it.
+    pub fn removable(self) -> bool {
+        match self {
+            Structure::Wall => true,
+            Structure::CommandCenter => false,
+        }
+    }
+}
+
+/// A square of cells that something bigger than one cell stands on, e.g. the Command Center.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Footprint {
+    /// The lowest cell.
+    pub min: IVec2,
+    /// Cells along each side.
+    pub size: i32,
+}
+
+impl Footprint {
+    pub fn cells(self) -> impl Iterator<Item = IVec2> {
+        (0..self.size * self.size).map(move |i| self.min + IVec2::new(i % self.size, i / self.size))
+    }
+
+    /// The area it covers on the ground (world x and z).
+    pub fn area(self) -> Rect {
+        let min = self.min.as_vec2();
+        Rect::from_corners(min, min + Vec2::splat(self.size as f32))
+    }
+
+    /// Its middle on the ground.
+    pub fn center(self) -> Vec3 {
+        let center = self.area().center();
+        Vec3::new(center.x, 0.0, center.y)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -284,6 +334,23 @@ mod tests {
             grid.set_structure(IVec2::new(999, 0), Some(Structure::Wall)),
             None
         );
+    }
+
+    #[test]
+    fn footprints() {
+        let footprint = Footprint {
+            min: IVec2::new(-1, -1),
+            size: 2,
+        };
+        let cells: Vec<IVec2> = footprint.cells().collect();
+        assert_eq!(
+            cells,
+            [(-1, -1), (0, -1), (-1, 0), (0, 0)]
+                .map(IVec2::from)
+                .to_vec()
+        );
+        assert_eq!(footprint.center(), Vec3::ZERO);
+        assert_eq!(footprint.area().size(), Vec2::splat(2.0));
     }
 
     #[test]

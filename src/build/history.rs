@@ -93,7 +93,9 @@ impl Stroke {
             }
             let wanted = match self.kind {
                 StrokeKind::Place(structure) if grid.check_build(cell).is_ok() => Some(structure),
-                StrokeKind::Remove if grid.structure(cell).is_some() => None,
+                StrokeKind::Remove if grid.structure(cell).is_some_and(Structure::removable) => {
+                    None
+                }
                 _ => continue,
             };
             if let Some(change) = grid.set_structure(cell, wanted) {
@@ -296,6 +298,20 @@ mod tests {
         // Going back puts them up again.
         stroke.update(&mut grid, IVec2::new(2, 0));
         assert_eq!(walls(&grid), cells(&[(0, 0), (3, 0), (4, 0)]));
+    }
+
+    #[test]
+    fn the_command_center_cant_be_removed() {
+        let mut grid = grid();
+        let base = IVec2::new(2, 0);
+        grid.set_structure(base, Some(Structure::CommandCenter));
+        grid.set_structure(IVec2::new(3, 0), Some(Structure::Wall));
+        let (mut stroke, changes) = Stroke::begin(StrokeKind::Remove, base, &mut grid);
+        assert!(changes.is_empty() && stroke.is_empty());
+        // A line across it removes the wall next to it, and leaves the Command Center standing.
+        stroke.update(&mut grid, IVec2::new(4, 0));
+        assert_eq!(grid.structure(base), Some(Structure::CommandCenter));
+        assert_eq!(grid.structure(IVec2::new(3, 0)), None);
     }
 
     #[test]

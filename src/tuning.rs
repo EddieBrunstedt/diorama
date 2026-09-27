@@ -10,6 +10,48 @@ pub mod grid {
     pub const CHUNK_SIZE: i32 = 16;
     /// The starting map is this many chunks along each side, centered on the origin.
     pub const STARTING_CHUNKS: i32 = 2;
+    /// Cells along each side of the Command Center and of a nest.
+    pub const COMMAND_CENTER_SIZE: i32 = 2;
+    pub const NEST_SIZE: i32 = 2;
+}
+
+/// How the horde finds its way: what each cell costs to walk through, in cells of open ground.
+pub mod flow {
+    /// A wall is passable, but costs as much as this many cells of detour. When a maze makes the
+    /// way around longer than that, the horde goes for the wall instead. A placeholder until
+    /// milestone 3 bases it on the wall's HP.
+    pub const WALL_COST: f32 = 40.0;
+}
+
+/// The horde: swarmers pouring out of the nests toward the Command Center.
+pub mod horde {
+    /// Swarmers released by one press of Space (until the wave loop of milestone 5).
+    pub const BATCH: u32 = 100;
+    /// Swarmers coming out of each nest per second. Big batches come out faster, so that a
+    /// batch is always out within `BATCH_MAX_SECONDS`.
+    pub const SPAWN_RATE: f32 = 60.0;
+    pub const BATCH_MAX_SECONDS: f32 = 4.0;
+    /// Top speed in cells per second, and how much it varies from swarmer to swarmer (a
+    /// fraction), so the horde doesn't move in lockstep.
+    pub const SWARMER_SPEED: f32 = 3.0;
+    pub const SPEED_VARIATION: f32 = 0.12;
+    /// How quickly a swarmer turns and gets up to speed (per second, exponential).
+    pub const STEERING_RATE: f32 = 10.0;
+    /// Half a swarmer's width: they keep this far from walls, and twice this from each other.
+    pub const SWARMER_RADIUS: f32 = 0.25;
+    /// How much of an overlap between two swarmers is pushed apart each frame (0..1). Lower is
+    /// squishier.
+    pub const SEPARATION_STIFFNESS: f32 = 0.6;
+    /// Each swarmer is pushed apart from at most this many neighbors a frame, so a dense pile
+    /// can't make the cost explode.
+    pub const MAX_NEIGHBORS: usize = 12;
+    /// Damage a swarmer deals when it reaches the Command Center.
+    pub const SWARMER_DAMAGE: u32 = 1;
+}
+
+/// The Command Center: what the horde is after.
+pub mod command_center {
+    pub const MAX_HP: u32 = 1000;
 }
 
 /// The overview camera: steep, looking straight up the map (rows stay level on screen).
@@ -69,6 +111,37 @@ pub mod juice {
     pub const DENIED_FLASH_SECONDS: f32 = 0.25;
     /// The hover highlight pops (stretch amount) when it moves to another cell.
     pub const HOVER_POP: f32 = 0.35;
+
+    /// A swarmer rises out of its nest from this deep, growing to full size, over this long.
+    pub const EMERGE_DEPTH: f32 = 0.2;
+    pub const EMERGE_SECONDS: f32 = 0.25;
+    /// Swarmers scuttle: a hop this high, with the walk cycle advancing this much (radians) per
+    /// cell walked. A hop is half a cycle.
+    pub const SCUTTLE_HOP: f32 = 0.035;
+    pub const SCUTTLE_STRIDE: f32 = 10.0;
+    /// A nest heaves (stretch amount) as swarmers come out, at most once per interval (seconds).
+    pub const NEST_PULSE: f32 = 0.3;
+    pub const NEST_PULSE_INTERVAL: f32 = 0.18;
+    /// The Command Center flinches (squash), flashes and shakes the camera when it's hit, and
+    /// the swarmer bursts into gibs. Only so many bursts a frame, however many arrive at once.
+    pub const BASE_HIT_SQUASH: f32 = -0.12;
+    pub const BASE_HIT_FLASH_SECONDS: f32 = 0.12;
+    pub const BASE_HIT_SHAKE: f32 = 0.06;
+    pub const BASE_HIT_SHAKE_MAX: f32 = 0.3;
+    pub const GIB_COUNT: usize = 5;
+    pub const GIB_SIZE: f32 = 0.08;
+    pub const GIB_SPREAD: f32 = 2.0;
+    pub const GIB_LIFT: f32 = 2.6;
+    pub const GIB_LIFETIME: f32 = 0.45;
+    pub const MAX_GIB_BURSTS: usize = 8;
+    /// When its HP runs out: a big shake and a long flash.
+    pub const BASE_FALL_SHAKE: f32 = 0.8;
+    pub const BASE_FALL_FLASH_SECONDS: f32 = 0.6;
+    /// The path preview: arrows this far apart, crawling toward the Command Center at this speed
+    /// (cells per second), and flaring up for a moment when the route changes.
+    pub const PREVIEW_SPACING: f32 = 0.7;
+    pub const PREVIEW_CRAWL: f32 = 1.2;
+    pub const PREVIEW_FLARE_SECONDS: f32 = 0.35;
 
     /// Longest frame step the springs integrate at once, so a hitch can't make them explode.
     pub const MAX_SPRING_STEP: f32 = 1.0 / 30.0;

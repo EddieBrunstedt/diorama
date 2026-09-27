@@ -105,7 +105,7 @@ fn wanted(grid: &Grid, pointer: &Pointer, active: &ActiveStroke) -> Vec<(IVec2, 
             .map(|cell| {
                 let look = match grid.check_build(cell) {
                     Ok(()) => Look::Build,
-                    Err(Blocked::Occupied(_)) => Look::Remove,
+                    Err(Blocked::Occupied(structure)) if structure.removable() => Look::Remove,
                     Err(_) => Look::Blocked,
                 };
                 vec![(cell, look)]

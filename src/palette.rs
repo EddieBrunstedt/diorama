@@ -15,6 +15,25 @@ pub const ROCK: Color = Color::srgb(0.3, 0.19, 0.17);
 pub const CONCRETE: Color = Color::srgb(0.5, 0.5, 0.48);
 /// A band of hazard yellow along the top of walls: built by humans.
 pub const HAZARD: Color = Color::srgb(0.95, 0.72, 0.1);
+/// The Command Center: worn steel over concrete, with cyan lights.
+pub const STEEL: Color = Color::srgb(0.33, 0.37, 0.4);
+pub const BASE_LIGHT: Color = Color::srgb(0.45, 0.95, 1.0);
+/// How the Command Center glows for a moment when it's hit.
+pub const BASE_HIT: Color = Color::srgb(1.0, 0.3, 0.15);
+
+/// The horde: purple chitin, lighter on the back so a crowd reads against the dark ground, with
+/// acid-green eyes. Nests sit in a crust of dark creep around a glowing pit.
+pub const CHITIN: Color = Color::srgb(0.62, 0.24, 0.5);
+pub const CHITIN_DARK: Color = Color::srgb(0.3, 0.1, 0.26);
+pub const ACID: Color = Color::srgb(0.75, 1.0, 0.2);
+pub const CREEP: Color = Color::srgb(0.2, 0.1, 0.19);
+pub const NEST_PIT: Color = Color::srgb(0.08, 0.03, 0.07);
+/// Bits of a swarmer that bursts on the Command Center.
+pub const GIBS: [Color; 3] = [
+    Color::srgb(0.62, 0.24, 0.5),
+    Color::srgb(0.4, 0.14, 0.34),
+    Color::srgb(0.75, 1.0, 0.2),
+];
 
 /// Dust kicked up by a landing: lighter than the ground, so it reads against it.
 pub const DUST: [Color; 3] = [
@@ -29,9 +48,18 @@ pub const HOVER_OK: Color = Color::srgb(0.45, 0.95, 1.0);
 pub const HOVER_BLOCKED: Color = Color::srgb(1.0, 0.25, 0.2);
 pub const HOVER_REMOVE: Color = Color::srgb(1.0, 0.6, 0.15);
 
+/// The path preview: where the horde will go, in the horde's color, and red where it will go
+/// through a wall.
+pub const PATH_PREVIEW: Color = Color::srgb(0.95, 0.4, 0.85);
+pub const PATH_BREACH: Color = Color::srgb(1.0, 0.25, 0.2);
+
 /// The sun and the sky's fill light.
 pub const SUN: Color = Color::srgb(1.0, 0.95, 0.88);
 pub const SKYLIGHT: Color = Color::srgb(0.6, 0.7, 0.9);
 
 /// Controls hint text.
 pub const HINT_TEXT: Color = Color::srgba(0.85, 0.87, 0.9, 0.75);
+/// The Command Center's health bar: filled, empty, and filled while it's low.
+pub const HEALTH: Color = Color::srgb(0.45, 0.95, 1.0);
+pub const HEALTH_EMPTY: Color = Color::srgba(1.0, 1.0, 1.0, 0.12);
+pub const HEALTH_LOW: Color = Color::srgb(1.0, 0.3, 0.15);

@@ -7,6 +7,8 @@
 //! - `DIORAMA_SCRIPT="1 move 800 450; 1.1 down; 1.5 move 900 450; 1.6 up"` fakes input at the
 //!   given times (seconds):
 //!   - `move X Y` moves the cursor (logical pixels);
+//!   - `cell X Y` moves the cursor over the middle of grid cell (X, Y) on the ground, wherever
+//!     the window's size puts it;
 //!   - `down` / `up` presses or releases a mouse button: `left` (the default), `right` or
 //!     `middle`, e.g. `2 down right`;
 //!   - `key K` taps a key, `hold K` / `release K` keep one down (a letter, a digit, `esc`,
@@ -14,12 +16,17 @@
 //!   - `scroll N` scrolls N lines (positive zooms in).
 //! - `DIORAMA_SPEED=4` runs the game four times as fast (0.25 for slow motion). Screenshot and
 //!   script times are in game time, so they speed up too.
+//! - `DIORAMA_BATCH=3000` makes Space release that many swarmers at once, for testing how many
+//!   the game can take.
 //! - `DIORAMA_SEED=7` fixes the random seed (see [`RunSeed`]), so scripted runs repeat.
 //! - `DIORAMA_GPU_TIMES=1` logs the GPU time of each render pass every few seconds (see [`gpu`]).
 
 mod fps;
 mod gpu;
 
+use crate::camera::{CameraRig, MainCamera};
+use crate::grid::cell_center;
+use crate::horde::BatchSize;
 use crate::rng::RunSeed;
 use bevy::{
     input::{
@@ -69,6 +76,9 @@ impl Plugin for DevPlugin {
                 // Let long frames through, so fast-forwarding doesn't slow down again.
                 time.set_max_delta(std::time::Duration::from_secs_f32(0.25 * speed));
             });
+        }
+        if let Some(batch) = env_number::<u32>("DIORAMA_BATCH") {
+            app.insert_resource(BatchSize(batch));
         }
         if let Some(seed) = env_number::<u64>("DIORAMA_SEED") {
             app.insert_resource(RunSeed(seed));
@@ -138,6 +148,7 @@ pub struct ScriptedCursor(pub Vec2);
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Step {
     Move(Vec2),
+    Cell(IVec2),
     Button(MouseButton, ButtonState),
     Key(KeyCode, Press),
     Scroll(f32),
@@ -242,6 +253,13 @@ fn parse_script(script: &str) -> Result<Vec<(f32, Step)>, String> {
             };
             let step = match words.get(1).copied() {
                 Some("move") => Step::Move(Vec2::new(number(2)?, number(3)?)),
+                Some("cell") => {
+                    let (x, y) = (number(2)?, number(3)?);
+                    if x.fract() != 0.0 || y.fract() != 0.0 {
+                        return Err(format!("expected whole cells in {line:?}"));
+                    }
+                    Step::Cell(IVec2::new(x as i32, y as i32))
+                }
                 Some("down") => Step::Button(button()?, ButtonState::Pressed),
                 Some("up") => Step::Button(button()?, ButtonState::Released),
                 Some("key") => key(Press::Tap)?,
@@ -260,6 +278,8 @@ fn run_input_script(
     time: Res<Time>,
     mut script: ResMut<InputScript>,
     window: Single<Entity, With<PrimaryWindow>>,
+    camera: Single<&Camera, With<MainCamera>>,
+    rig: Res<CameraRig>,
     mut window_events: MessageWriter<WindowEvent>,
     mut buttons: MessageWriter<MouseButtonInput>,
     mut keyboard: MessageWriter<KeyboardInput>,
@@ -270,7 +290,22 @@ fn run_input_script(
         && time.elapsed_secs() >= at
     {
         script.next += 1;
+        let step = match step {
+            Step::Cell(cell) => {
+                let center = cell_center(cell);
+                let transform = GlobalTransform::from(rig.transform());
+                match camera.world_to_viewport(&transform, center) {
+                    Ok(position) => Step::Move(position),
+                    Err(error) => {
+                        warn!("DIORAMA_SCRIPT: cell {cell} isn't on screen: {error:?}");
+                        continue;
+                    }
+                }
+            }
+            step => step,
+        };
         match step {
+            Step::Cell(_) => unreachable!("turned into a move above"),
             Step::Move(position) => {
                 commands.insert_resource(ScriptedCursor(position));
                 window_events.write(WindowEvent::CursorMoved(CursorMoved {
@@ -327,7 +362,7 @@ mod tests {
     fn parses_scripts() {
         let steps = parse_script(
             "1 move 10 20; 1.5 down ;2 up right; 2.5 down middle; 3 hold ctrl; 3.1 key Z; \
-             3.2 release ctrl; 4 scroll -2",
+             3.2 release ctrl; 4 scroll -2; 5 cell -3 7",
         )
         .unwrap();
         assert_eq!(
@@ -341,12 +376,14 @@ mod tests {
                 (3.1, Step::Key(KeyCode::KeyZ, Press::Tap)),
                 (3.2, Step::Key(KeyCode::ControlLeft, Press::Release)),
                 (4.0, Step::Scroll(-2.0)),
+                (5.0, Step::Cell(IVec2::new(-3, 7))),
             ]
         );
         assert!(parse_script("1 jump").is_err());
         assert!(parse_script("x down").is_err());
         assert!(parse_script("1 key f13").is_err());
         assert!(parse_script("1 down sideways").is_err());
+        assert!(parse_script("1 cell 0.5 2").is_err());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! up and shrinks away in a spray of rubble.
 
 use crate::build::{BuildDenied, BuildSystems, StructureChanged};
+use crate::command_center;
 use crate::grid::{Structure, cell_center};
 use crate::juice::{Burst, Particles, Shake, Squash, Tween, TweenDone, TweenTarget, Wobble};
 use crate::palette;
@@ -20,6 +21,7 @@ const HAZARD_BAND: (f32, f32) = (0.2, 0.08);
 pub fn structure_height(structure: Structure) -> f32 {
     match structure {
         Structure::Wall => WALL_HEIGHT,
+        Structure::CommandCenter => command_center::HEIGHT,
     }
 }
 
@@ -125,6 +127,8 @@ fn follow_changes(
         if let Some(structure) = change.after {
             let mesh = match structure {
                 Structure::Wall => assets.wall.clone(),
+                // Never built or removed: it stands from the start (see `command_center`).
+                Structure::CommandCenter => continue,
             };
             let delay = stagger * landing as f32;
             landing += 1;

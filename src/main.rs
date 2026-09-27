@@ -8,14 +8,18 @@
 
 mod build;
 mod camera;
+mod command_center;
 mod dev;
 mod environment;
+mod flow;
 mod grid;
+mod horde;
 mod hud;
 mod juice;
 mod map;
 mod palette;
 mod pointer;
+mod preview;
 mod rng;
 mod shapes;
 mod structures;
@@ -43,6 +47,10 @@ fn main() {
             pointer::PointerPlugin,
             build::BuildPlugin,
             structures::StructuresPlugin,
+            flow::FlowPlugin,
+            horde::HordePlugin,
+            command_center::CommandCenterPlugin,
+            preview::PreviewPlugin,
             hud::HudPlugin,
             juice::JuicePlugin,
             dev::DevPlugin,

@@ -1,10 +1,11 @@
-//! The map: the starting [`Grid`] and the ground it's drawn as, one mesh per chunk.
+//! The map: the starting [`Grid`], where the Command Center and the nests are ([`Landmarks`]),
+//! and the ground it's drawn as, one mesh per chunk.
 
-use crate::grid::{Chunk, Grid, Terrain};
+use crate::grid::{Chunk, Footprint, Grid, Structure, Terrain};
 use crate::palette;
 use crate::rng::Rng;
 use crate::shapes::{BoxMesh, ShapeMaterial, shade, vary};
-use crate::tuning::grid::{CHUNK_SIZE, STARTING_CHUNKS};
+use crate::tuning::grid::{CHUNK_SIZE, COMMAND_CENTER_SIZE, NEST_SIZE, STARTING_CHUNKS};
 use bevy::prelude::*;
 
 /// Gap between neighboring cells' tiles, and the width of the seam along chunk borders.
@@ -14,6 +15,8 @@ const CHUNK_SEAM: f32 = 0.12;
 const SLAB_DEPTH: f32 = 0.5;
 /// Rocks are blocks of varying height.
 const ROCK_HEIGHT: (f32, f32) = (0.45, 0.8);
+/// A nest's ground is a low crust of creep.
+pub const NEST_HEIGHT: f32 = 0.05;
 /// Salts for the per-cell random numbers.
 const SALT_TILE: u64 = 1;
 const SALT_ROCK: u64 = 2;
@@ -33,14 +36,40 @@ pub struct MapPlugin;
 
 impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(starting_map())
+        let landmarks = starting_landmarks();
+        app.insert_resource(starting_map(&landmarks))
+            .insert_resource(landmarks)
             .init_resource::<ShapeMaterial>()
             .add_systems(Startup, spawn_ground);
     }
 }
 
-/// `STARTING_CHUNKS`×`STARTING_CHUNKS` chunks of bare ground around the origin, with a few rocks.
-pub fn starting_map() -> Grid {
+/// Where the Command Center and the nests are.
+#[derive(Resource, Clone, Debug)]
+pub struct Landmarks {
+    pub command_center: Footprint,
+    pub nests: Vec<Footprint>,
+}
+
+/// The Command Center right in the middle of the starting map, and one nest in the middle of its
+/// top edge (the far side, seen from the camera), so the horde pours down the screen.
+pub fn starting_landmarks() -> Landmarks {
+    let top_edge = -STARTING_CHUNKS / 2 * CHUNK_SIZE;
+    Landmarks {
+        command_center: Footprint {
+            min: IVec2::splat(-COMMAND_CENTER_SIZE / 2),
+            size: COMMAND_CENTER_SIZE,
+        },
+        nests: vec![Footprint {
+            min: IVec2::new(-NEST_SIZE / 2, top_edge),
+            size: NEST_SIZE,
+        }],
+    }
+}
+
+/// `STARTING_CHUNKS`×`STARTING_CHUNKS` chunks of bare ground around the origin, with a few rocks,
+/// the Command Center and the nests.
+pub fn starting_map(landmarks: &Landmarks) -> Grid {
     let mut grid = Grid::default();
     let low = -STARTING_CHUNKS / 2;
     for y in low..low + STARTING_CHUNKS {
@@ -55,6 +84,14 @@ pub fn starting_map() -> Grid {
             }
         }
     }
+    for cell in landmarks.command_center.cells() {
+        grid.set_structure(cell, Some(Structure::CommandCenter));
+    }
+    for nest in &landmarks.nests {
+        for cell in nest.cells() {
+            grid.set_terrain(cell, Terrain::Nest);
+        }
+    }
     grid
 }
 
@@ -62,6 +99,7 @@ pub fn starting_map() -> Grid {
 pub fn terrain_height(cell: IVec2, terrain: Terrain) -> f32 {
     match terrain {
         Terrain::Ground => 0.0,
+        Terrain::Nest => NEST_HEIGHT,
         Terrain::Rock => {
             let (low, high) = ROCK_HEIGHT;
             Rng::for_cell(cell, SALT_ROCK).range(low, high)
@@ -122,6 +160,16 @@ fn chunk_mesh(grid: &Grid, at: IVec2) -> Mesh {
                     let color = vary(palette::GROUND, &mut rng, 0.012, 4.0);
                     mesh.quad(min, max, 0.002, color);
                 }
+                Terrain::Nest => {
+                    // A crust of creep over the whole cell, so a nest reads as one patch.
+                    let color = vary(palette::CREEP, &mut rng, 0.02, 8.0);
+                    let (low, high) = (local.as_vec2(), (local + IVec2::ONE).as_vec2());
+                    mesh.cuboid(
+                        Vec3::new(low.x, 0.0, low.y),
+                        Vec3::new(high.x, NEST_HEIGHT, high.y),
+                        color,
+                    );
+                }
                 Terrain::Rock => {
                     // Rock fills the whole cell, so neighboring rocks merge into one outcrop,
                     // with a lump on top so it reads as natural rather than built.
@@ -146,4 +194,40 @@ fn chunk_mesh(grid: &Grid, at: IVec2) -> Mesh {
         }
     }
     mesh.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow::FlowField;
+
+    #[test]
+    fn the_starting_map_holds_its_landmarks() {
+        let landmarks = starting_landmarks();
+        let grid = starting_map(&landmarks);
+        let bounds = grid.bounds().unwrap();
+        let on_map = |footprint: Footprint| {
+            footprint
+                .cells()
+                .all(|cell| bounds.contains(cell) && grid.cell(cell).is_some())
+        };
+        assert!(on_map(landmarks.command_center));
+        assert_eq!(landmarks.command_center.center(), Vec3::ZERO);
+        for cell in landmarks.command_center.cells() {
+            assert_eq!(grid.structure(cell), Some(Structure::CommandCenter));
+        }
+        assert!(!landmarks.nests.is_empty());
+        let field = FlowField::new(&grid, landmarks.command_center.cells());
+        for &nest in &landmarks.nests {
+            assert!(on_map(nest));
+            for cell in nest.cells() {
+                assert_eq!(grid.cell(cell).unwrap().terrain, Terrain::Nest);
+                assert!(grid.check_build(cell).is_err());
+                assert!(
+                    field.distance(cell).is_finite(),
+                    "{cell} can't reach the base"
+                );
+            }
+        }
+    }
 }
