@@ -99,7 +99,7 @@ fn strokes(
         return;
     };
     for (button, kind) in [
-        (MouseButton::Left, StrokeKind::Place(Structure::Wall)),
+        (MouseButton::Left, StrokeKind::Place(Structure::WALL)),
         (MouseButton::Right, StrokeKind::Remove),
     ] {
         if buttons.just_pressed(button) {

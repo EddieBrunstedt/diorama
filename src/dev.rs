@@ -17,7 +17,7 @@
 //! - `DIORAMA_SPEED=4` runs the game four times as fast (0.25 for slow motion). Screenshot and
 //!   script times are in game time, so they speed up too.
 //! - `DIORAMA_BATCH=3000` makes Space release that many swarmers at once, for testing how many
-//!   the game can take.
+//!   the game can take. `DIORAMA_BRUTES=10` does the same for the brutes B releases.
 //! - `DIORAMA_SEED=7` fixes the random seed (see [`RunSeed`]), so scripted runs repeat.
 //! - `DIORAMA_GPU_TIMES=1` logs the GPU time of each render pass every few seconds (see [`gpu`]).
 
@@ -26,7 +26,7 @@ mod gpu;
 
 use crate::camera::{CameraRig, MainCamera};
 use crate::grid::cell_center;
-use crate::horde::BatchSize;
+use crate::horde::{BatchSize, BruteBatch};
 use crate::rng::RunSeed;
 use bevy::{
     input::{
@@ -79,6 +79,9 @@ impl Plugin for DevPlugin {
         }
         if let Some(batch) = env_number::<u32>("DIORAMA_BATCH") {
             app.insert_resource(BatchSize(batch));
+        }
+        if let Some(brutes) = env_number::<u32>("DIORAMA_BRUTES") {
+            app.insert_resource(BruteBatch(brutes));
         }
         if let Some(seed) = env_number::<u64>("DIORAMA_SEED") {
             app.insert_resource(RunSeed(seed));

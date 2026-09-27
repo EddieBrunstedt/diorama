@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::grid::{Chunk, Terrain};
 
-    const WALL: StrokeKind = StrokeKind::Place(Structure::Wall);
+    const WALL: StrokeKind = StrokeKind::Place(Structure::WALL);
 
     fn grid() -> Grid {
         let mut grid = Grid::default();
@@ -235,7 +235,7 @@ mod tests {
         let mut grid = grid();
         let (stroke, changes) = Stroke::begin(WALL, IVec2::new(3, 4), &mut grid);
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].after, Some(Structure::Wall));
+        assert_eq!(changes[0].after, Some(Structure::WALL));
         assert!(!stroke.is_empty());
         assert_eq!(walls(&grid), cells(&[(3, 4)]));
     }
@@ -244,7 +244,7 @@ mod tests {
     fn dragging_places_a_line_around_blocked_cells() {
         let mut grid = grid();
         grid.set_terrain(IVec2::new(3, 1), Terrain::Rock);
-        grid.set_structure(IVec2::new(5, 1), Some(Structure::Wall));
+        grid.set_structure(IVec2::new(5, 1), Some(Structure::WALL));
         let (mut stroke, _) = Stroke::begin(WALL, IVec2::new(1, 1), &mut grid);
         let changes = stroke.update(&mut grid, IVec2::new(6, 2));
         let placed: Vec<IVec2> = changes.iter().map(|change| change.cell).collect();
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn a_drag_never_removes_walls_it_did_not_place() {
         let mut grid = grid();
-        grid.set_structure(IVec2::new(3, 1), Some(Structure::Wall));
+        grid.set_structure(IVec2::new(3, 1), Some(Structure::WALL));
         let (mut stroke, _) = Stroke::begin(WALL, IVec2::new(1, 1), &mut grid);
         stroke.update(&mut grid, IVec2::new(4, 1));
         stroke.update(&mut grid, IVec2::new(1, 1));
@@ -289,7 +289,7 @@ mod tests {
     fn remove_strokes_clear_walls() {
         let mut grid = grid();
         for x in 0..5 {
-            grid.set_structure(IVec2::new(x, 0), Some(Structure::Wall));
+            grid.set_structure(IVec2::new(x, 0), Some(Structure::WALL));
         }
         let (mut stroke, changes) = Stroke::begin(StrokeKind::Remove, IVec2::new(1, 0), &mut grid);
         assert_eq!(changes.len(), 1);
@@ -305,7 +305,7 @@ mod tests {
         let mut grid = grid();
         let base = IVec2::new(2, 0);
         grid.set_structure(base, Some(Structure::CommandCenter));
-        grid.set_structure(IVec2::new(3, 0), Some(Structure::Wall));
+        grid.set_structure(IVec2::new(3, 0), Some(Structure::WALL));
         let (mut stroke, changes) = Stroke::begin(StrokeKind::Remove, base, &mut grid);
         assert!(changes.is_empty() && stroke.is_empty());
         // A line across it removes the wall next to it, and leaves the Command Center standing.
@@ -317,19 +317,19 @@ mod tests {
     #[test]
     fn a_stroke_remembers_what_stood_before_it() {
         let mut grid = grid();
-        grid.set_structure(IVec2::new(2, 0), Some(Structure::Wall));
+        grid.set_structure(IVec2::new(2, 0), Some(Structure::WALL));
         let (mut stroke, _) = Stroke::begin(WALL, IVec2::new(0, 0), &mut grid);
         stroke.update(&mut grid, IVec2::new(3, 0));
         let before = |x| stroke.structure_before(&grid, IVec2::new(x, 0));
         assert_eq!(before(0), None, "placed by the stroke");
-        assert_eq!(before(2), Some(Structure::Wall), "already there");
+        assert_eq!(before(2), Some(Structure::WALL), "already there");
         assert_eq!(before(5), None, "untouched");
 
         let (stroke, _) = Stroke::begin(StrokeKind::Remove, IVec2::new(1, 0), &mut grid);
         assert_eq!(grid.structure(IVec2::new(1, 0)), None);
         assert_eq!(
             stroke.structure_before(&grid, IVec2::new(1, 0)),
-            Some(Structure::Wall),
+            Some(Structure::WALL),
             "removed by the stroke"
         );
     }
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn cancelling_restores_the_grid() {
         let mut grid = grid();
-        grid.set_structure(IVec2::new(0, 5), Some(Structure::Wall));
+        grid.set_structure(IVec2::new(0, 5), Some(Structure::WALL));
         let before = grid.clone();
         let (mut stroke, _) = Stroke::begin(WALL, IVec2::new(0, 0), &mut grid);
         stroke.update(&mut grid, IVec2::new(0, 8));

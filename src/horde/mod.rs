@@ -1,24 +1,31 @@
-//! The horde: swarmers pour out of the nests and follow the flow field to the Command Center,
-//! crowding like a horde instead of stacking up. One that reaches the Command Center dies on it
-//! and deals damage.
+//! The horde: swarmers and brutes pour out of the nests and follow their flow fields to the
+//! Command Center, crowding like a horde instead of stacking up. Where their way leads through a
+//! wall, they stop at it and attack it until it breaks. One that reaches the Command Center dies
+//! on it and deals damage.
 //!
-//! Space releases a batch of swarmers, until milestone 5 brings waves. Thousands can be on the
-//! map at once: they share one mesh and one material so they're drawn in a few batches, move in
-//! parallel, and find their neighbors through a spatial hash ([`crowd`], plain data).
+//! Space releases a batch of swarmers and B a few brutes ([`brute`]), until milestone 5 brings
+//! waves. Thousands of swarmers can be on the map at once: they share one mesh and one material
+//! so they're drawn in a few batches, move in parallel, and find their neighbors through a
+//! spatial hash ([`crowd`], plain data).
 
+mod brute;
 pub mod crowd;
 mod nest;
 
 use crate::command_center::CommandCenterHit;
-use crate::flow::{FlowField, FlowSystems};
+use crate::flow::{Class, FlowFields, FlowSystems};
 use crate::map::Landmarks;
 use crate::palette;
 use crate::rng::{Rng, RunSeed};
 use crate::shapes::{BoxMesh, ShapeMaterial, shade};
 use crate::tuning::horde::*;
-use crate::tuning::juice::{EMERGE_DEPTH, EMERGE_SECONDS, SCUTTLE_HOP, SCUTTLE_STRIDE};
-use bevy::prelude::*;
-use crowd::{CrowdIndex, push_out, separation, steer, touches};
+use crate::tuning::juice::{
+    BITE_LUNGE, BITE_SECONDS, EMERGE_DEPTH, EMERGE_SECONDS, SCUTTLE_HOP, SCUTTLE_STRIDE,
+};
+use crate::walls::WallHit;
+use bevy::{prelude::*, utils::Parallel};
+pub use brute::{Brute, BruteBatch, BruteQueue};
+use crowd::{CrowdIndex, push_out, separation, shove, steer, touches, walls_in_the_way};
 
 /// Longest step the crowd moves at once, so a hitch can't throw swarmers through walls.
 const MAX_STEP: f32 = 1.0 / 20.0;
@@ -33,15 +40,20 @@ impl Plugin for HordePlugin {
             .init_resource::<ShapeMaterial>()
             .init_resource::<Crowd>()
             .add_message::<SwarmersEmerged>()
-            .add_plugins(nest::NestPlugin)
+            .add_plugins((nest::NestPlugin, brute::BrutePlugin))
             .add_systems(Startup, seed_horde)
             .add_systems(
                 Update,
                 (
                     release_batch,
                     spawn_swarmers,
+                    brute::release_brutes,
+                    brute::spawn_brutes,
+                    // Brutes first: swarmers get out of their way.
+                    brute::move_brutes,
                     move_swarmers,
                     reach_command_center,
+                    brute::reach_command_center,
                 )
                     .chain()
                     .in_set(HordeSystems)
@@ -91,6 +103,9 @@ pub struct Swarmer {
     stride: f32,
     /// Seconds since it came out of the nest.
     age: f32,
+    /// Seconds until it can bite again, and what's left of its bite's lunge.
+    bite_cooldown: f32,
+    lunge: f32,
 }
 
 #[derive(Resource)]
@@ -224,6 +239,9 @@ fn spawn_swarmers(
                     fallback,
                     stride: rng.range(0.0, std::f32::consts::TAU),
                     age: 0.0,
+                    // So a pile doesn't bite in lockstep.
+                    bite_cooldown: rng.range(0.0, SWARMER_BITE_INTERVAL),
+                    lunge: 0.0,
                 },
                 Mesh3d(assets.mesh.clone()),
                 MeshMaterial3d(material.0.clone()),
@@ -248,9 +266,12 @@ fn facing(direction: Vec2) -> Quat {
 
 fn move_swarmers(
     time: Res<Time>,
-    field: Res<FlowField>,
+    fields: Res<FlowFields>,
+    brutes: Res<brute::BruteCrowd>,
     mut crowd: ResMut<Crowd>,
     mut swarmers: Query<(Entity, &mut Swarmer, &mut Transform)>,
+    mut bites: Local<Parallel<Vec<WallHit>>>,
+    mut hits: MessageWriter<WallHit>,
 ) {
     let dt = time.delta_secs().min(MAX_STEP);
     if dt <= 0.0 {
@@ -259,6 +280,7 @@ fn move_swarmers(
     // Everyone moves against where the others were at the start of the frame, so the order
     // swarmers are moved in doesn't matter.
     let spacing = SWARMER_RADIUS * 2.0;
+    let field = &fields.swarmer;
     let crowd = &mut *crowd;
     if !crowd.index.covers(field.area(), spacing) {
         crowd.index = CrowdIndex::new(field.area(), spacing);
@@ -271,16 +293,17 @@ fn move_swarmers(
     );
     crowd.index.rebuild(&crowd.positions);
     let index = &crowd.index;
+    let brute_spacing = SWARMER_RADIUS + BRUTE_RADIUS;
+    let alignment = ATTACK_ANGLE.to_radians().cos();
 
     swarmers
         .par_iter_mut()
         .for_each(|(entity, mut swarmer, mut transform)| {
             let at = transform.translation.xz();
-            let desired = field.direction_at(at) * swarmer.speed;
+            let heading = field.direction_at(at);
+            let desired = heading * swarmer.speed;
             let velocity = steer(swarmer.velocity, desired, STEERING_RATE, dt);
-            // However hard the crowd shoves, a swarmer moves less than half a cell a frame, so
-            // `push_out` always sends it back out the side it came in through.
-            let push = separation(
+            let mut push = separation(
                 index,
                 at,
                 entity,
@@ -288,14 +311,51 @@ fn move_swarmers(
                 SEPARATION_STIFFNESS,
                 MAX_NEIGHBORS,
                 swarmer.fallback,
-            )
-            .clamp_length_max(SWARMER_RADIUS);
+            );
+            // Brutes don't budge for swarmers: they shove them out of the way.
+            for &(brute, _) in brutes.index.near(at, brute_spacing) {
+                push += shove(at, brute, brute_spacing, swarmer.fallback);
+            }
+            // However hard the crowd shoves, a swarmer moves less than half a cell a frame, so
+            // `push_out` always sends it back out the side it came in through.
+            let push = push.clamp_length_max(SWARMER_RADIUS);
             let mut next = push_out(at + velocity * dt + push, SWARMER_RADIUS, |cell| {
-                field.is_clear(cell)
+                fields.cell_is_clear(cell)
             });
             // Never end up inside a wall or off the map, whatever happens.
-            if !field.is_clear(next.floor().as_ivec2()) {
+            let here = next.floor().as_ivec2();
+            if !fields.cell_is_clear(here) {
                 next = at;
+            }
+
+            // Bite the wall in the way, if its way leads through one.
+            let here = next.floor().as_ivec2();
+            let through = |cell| {
+                fields.cell_is_breakable(cell) && field.distance(cell) < field.distance(here)
+            };
+            let wall = walls_in_the_way(
+                next,
+                SWARMER_RADIUS,
+                ATTACK_REACH,
+                heading,
+                alignment,
+                through,
+            )
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(cell, _)| cell);
+            swarmer.bite_cooldown = (swarmer.bite_cooldown - dt).max(0.0);
+            swarmer.lunge = (swarmer.lunge - dt).max(0.0);
+            if let Some(cell) = wall
+                && swarmer.bite_cooldown <= 0.0
+            {
+                swarmer.bite_cooldown = SWARMER_BITE_INTERVAL;
+                swarmer.lunge = BITE_SECONDS;
+                bites.borrow_local_mut().push(WallHit {
+                    cell,
+                    damage: SWARMER_BITE,
+                    by: Class::Swarmer,
+                    from: next,
+                });
             }
 
             // Scuttle: a quick hop per step, and rise out of the nest when new.
@@ -307,10 +367,17 @@ fn move_swarmers(
             let hop = swarmer.stride.sin().abs() * SCUTTLE_HOP;
             transform.translation = Vec3::new(next.x, hop - EMERGE_DEPTH * (1.0 - emerged), next.y);
             transform.scale = Vec3::splat(emerged);
-            if velocity.length_squared() > 0.01 {
-                transform.rotation = facing(velocity);
+            let look = match wall {
+                Some(cell) => Some(facing(cell.as_vec2() + 0.5 - next)),
+                None => (velocity.length_squared() > 0.01).then(|| facing(velocity)),
+            };
+            if let Some(look) = look {
+                // A bite dips the head in and back out.
+                let dip = (swarmer.lunge / BITE_SECONDS * std::f32::consts::PI).sin();
+                transform.rotation = look * Quat::from_rotation_x(-BITE_LUNGE * dip);
             }
         });
+    hits.write_batch(bites.drain());
 }
 
 fn reach_command_center(

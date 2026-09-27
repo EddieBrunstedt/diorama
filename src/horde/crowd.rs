@@ -1,6 +1,7 @@
-//! The crowd as plain data: a spatial hash for finding neighbors, and the rules a swarmer moves
-//! by. It steers along the flow field, gets pushed apart from the swarmers it overlaps, and is
-//! pushed back out of cells that aren't clear (walls, rock, off the map).
+//! The crowd as plain data: a spatial hash for finding neighbors, and the rules the horde moves
+//! by. An enemy steers along its flow field, gets pushed apart from the ones it overlaps, and is
+//! pushed back out of cells that aren't clear (walls, rock, off the map). One whose way leads
+//! through a wall it's touching stops there and attacks it ([`walls_in_the_way`]).
 //!
 //! Positions are on the ground plane (world x and z), in cells.
 
@@ -193,6 +194,64 @@ pub fn push_out(mut at: Vec2, radius: f32, clear: impl Fn(IVec2) -> bool) -> Vec
     at
 }
 
+/// How far `at` has to move to stop overlapping a heavy neighbor at `other` that doesn't budge
+/// (e.g. a swarmer in a brute's way), with `spacing` between their middles.
+pub fn shove(at: Vec2, other: Vec2, spacing: f32, fallback: Vec2) -> Vec2 {
+    let offset = at - other;
+    let distance = offset.length();
+    if distance >= spacing {
+        return Vec2::ZERO;
+    }
+    let away = if distance > 1e-4 {
+        offset / distance
+    } else {
+        fallback
+    };
+    away * (spacing - distance)
+}
+
+/// The cells around a circle that it could touch, as long as its radius is under a cell.
+const AROUND: [IVec2; 8] = [
+    IVec2::X,
+    IVec2::NEG_X,
+    IVec2::Y,
+    IVec2::NEG_Y,
+    IVec2::ONE,
+    IVec2::NEG_ONE,
+    IVec2::new(1, -1),
+    IVec2::new(-1, 1),
+];
+
+/// The walls a circle of `radius` at `at`, heading along `heading` (unit length), attacks: the
+/// cells around it that it touches (up to `reach` past its edge), no more than the angle whose
+/// cosine is `alignment` off its heading, and that `breakable` accepts (a wall its way leads
+/// through). Each comes with how well it lines up with the heading (1 is dead ahead).
+pub fn walls_in_the_way(
+    at: Vec2,
+    radius: f32,
+    reach: f32,
+    heading: Vec2,
+    alignment: f32,
+    breakable: impl Fn(IVec2) -> bool,
+) -> impl Iterator<Item = (IVec2, f32)> {
+    debug_assert!(
+        radius + reach < 1.0,
+        "only looks at the cells right around it"
+    );
+    let cell = at.floor().as_ivec2();
+    AROUND.into_iter().filter_map(move |step| {
+        let wall = cell + step;
+        let min = wall.as_vec2();
+        let offset = at.clamp(min, min + Vec2::ONE) - at;
+        let distance = offset.length();
+        if distance > radius + reach || distance < 1e-6 {
+            return None;
+        }
+        let lined_up = (offset / distance).dot(heading);
+        (lined_up >= alignment && breakable(wall)).then_some((wall, lined_up))
+    })
+}
+
 /// Turns `velocity` toward `desired`, closing the gap at `rate` per second (exponentially).
 pub fn steer(velocity: Vec2, desired: Vec2, rate: f32, dt: f32) -> Vec2 {
     velocity.lerp(desired, 1.0 - (-rate * dt).exp())
@@ -308,6 +367,66 @@ mod tests {
                 assert!((at.x - x).abs() < 1e-5, "slides along, not back");
             }
         }
+    }
+
+    #[test]
+    fn heavy_neighbors_shove_all_the_way() {
+        let push = shove(Vec2::new(1.0, 0.0), Vec2::ZERO, 1.5, Vec2::Y);
+        assert!(push.distance(Vec2::new(0.5, 0.0)) < 1e-5, "{push}");
+        assert_eq!(
+            shove(Vec2::new(2.0, 0.0), Vec2::ZERO, 1.5, Vec2::Y),
+            Vec2::ZERO
+        );
+        assert_eq!(
+            shove(Vec2::ZERO, Vec2::ZERO, 1.5, Vec2::Y),
+            Vec2::new(0.0, 1.5)
+        );
+    }
+
+    fn attacked(at: Vec2, radius: f32, heading: Vec2, walls: &[IVec2]) -> Vec<IVec2> {
+        let mut found: Vec<IVec2> =
+            walls_in_the_way(at, radius, 0.05, heading, 0.5, |cell| walls.contains(&cell))
+                .map(|(cell, _)| cell)
+                .collect();
+        found.sort_by_key(|cell| (cell.x, cell.y));
+        found
+    }
+
+    #[test]
+    fn attacks_the_wall_in_the_way() {
+        let wall = IVec2::new(1, 0);
+        // Pressed against its left side and heading into it.
+        assert_eq!(
+            attacked(Vec2::new(0.75, 0.5), 0.25, Vec2::X, &[wall]),
+            vec![wall]
+        );
+        // Heading along it, or away from it: leaves it alone.
+        assert!(attacked(Vec2::new(0.75, 0.5), 0.25, Vec2::Y, &[wall]).is_empty());
+        assert!(attacked(Vec2::new(0.75, 0.5), 0.25, Vec2::NEG_X, &[wall]).is_empty());
+        // Not touching it.
+        assert!(attacked(Vec2::new(0.4, 0.5), 0.25, Vec2::X, &[wall]).is_empty());
+        // Touching and heading into it, but it isn't a wall its way leads through.
+        assert!(attacked(Vec2::new(0.75, 0.5), 0.25, Vec2::X, &[]).is_empty());
+        // Heading at an angle into it still counts.
+        let slanted = Vec2::new(1.0, 0.6).normalize();
+        assert_eq!(
+            attacked(Vec2::new(0.75, 0.5), 0.25, slanted, &[wall]),
+            vec![wall]
+        );
+    }
+
+    #[test]
+    fn a_big_circle_attacks_both_walls_it_presses() {
+        // A brute's middle on the corner between cells (0, 0) and (1, 0), pressed against the
+        // walls at (0, 1) and (1, 1) below them.
+        let walls = [IVec2::new(0, 1), IVec2::new(1, 1)];
+        let at = Vec2::new(1.0, 1.0 - 0.75);
+        assert_eq!(attacked(at, 0.75, Vec2::Y, &walls), walls.to_vec());
+        // A step to the side, it still reaches the second one, but only at an angle.
+        let at = Vec2::new(0.8, 0.25);
+        let lined_up: Vec<(IVec2, f32)> =
+            walls_in_the_way(at, 0.75, 0.05, Vec2::Y, 0.5, |cell| walls.contains(&cell)).collect();
+        assert_eq!(lined_up.len(), 2, "{lined_up:?}");
     }
 
     #[test]

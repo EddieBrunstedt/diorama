@@ -199,7 +199,7 @@ fn chunk_mesh(grid: &Grid, at: IVec2) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow::FlowField;
+    use crate::flow::FlowFields;
 
     #[test]
     fn the_starting_map_holds_its_landmarks() {
@@ -217,17 +217,21 @@ mod tests {
             assert_eq!(grid.structure(cell), Some(Structure::CommandCenter));
         }
         assert!(!landmarks.nests.is_empty());
-        let field = FlowField::new(&grid, landmarks.command_center.cells());
+        let fields = FlowFields::new(&grid, &landmarks);
         for &nest in &landmarks.nests {
             assert!(on_map(nest));
             for cell in nest.cells() {
                 assert_eq!(grid.cell(cell).unwrap().terrain, Terrain::Nest);
                 assert!(grid.check_build(cell).is_err());
                 assert!(
-                    field.distance(cell).is_finite(),
+                    fields.swarmer.distance(cell).is_finite(),
                     "{cell} can't reach the base"
                 );
             }
+            // Brutes come out of the nest's middle, and can reach the base from there too.
+            let brutes = &fields.brute;
+            let middle = brutes.node_at(nest.center().xz());
+            assert!(brutes.distance(middle).is_finite(), "brutes can't leave");
         }
     }
 }

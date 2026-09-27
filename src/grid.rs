@@ -5,6 +5,7 @@
 //! grid `y` runs along world `+Z`, toward the camera.
 
 use crate::tuning::grid::CHUNK_SIZE;
+use crate::tuning::walls::WALL_HP;
 use bevy::{platform::collections::HashMap, prelude::*};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -37,20 +38,42 @@ impl Terrain {
 /// Something built on a cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Structure {
-    Wall,
+    /// The horde can break it: `hp` is what it has left. Its HP is part of the structure, so
+    /// undoing the removal of a damaged wall brings it back as damaged as it was.
+    Wall { hp: u32 },
     /// Part of the Command Center: what the horde is after. It's there from the start and can't
-    /// be removed.
+    /// be removed. Its HP is kept for the whole building (see `command_center`).
     CommandCenter,
 }
 
 impl Structure {
+    /// A newly built wall, at full HP.
+    pub const WALL: Structure = Structure::Wall { hp: WALL_HP };
+
     /// Whether the player can remove it.
     pub fn removable(self) -> bool {
         match self {
-            Structure::Wall => true,
+            Structure::Wall { .. } => true,
             Structure::CommandCenter => false,
         }
     }
+
+    /// HP left and the most it can have, if the horde can break it.
+    pub fn health(self) -> Option<(u32, u32)> {
+        match self {
+            Structure::Wall { hp } => Some((hp, WALL_HP)),
+            Structure::CommandCenter => None,
+        }
+    }
+}
+
+/// What a hit did to a structure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Damage {
+    /// It took the hit and still stands, with this much HP out of `max`.
+    Hurt { hp: u32, max: u32 },
+    /// It broke: the change that cleared the cell.
+    Broke(Change),
 }
 
 /// A square of cells that something bigger than one cell stands on, e.g. the Command Center.
@@ -227,6 +250,22 @@ impl Grid {
         Some(change)
     }
 
+    /// Hits whatever stands on `cell` for `amount` of damage. `None` if nothing breakable stands
+    /// there (e.g. it already broke).
+    pub fn damage(&mut self, cell: IVec2, amount: u32) -> Option<Damage> {
+        let data = self.cell_mut(cell)?;
+        let Some(Structure::Wall { hp }) = data.structure else {
+            return None;
+        };
+        let (_, max) = Structure::Wall { hp }.health()?;
+        let left = hp.saturating_sub(amount);
+        if left > 0 {
+            data.structure = Some(Structure::Wall { hp: left });
+            return Some(Damage::Hurt { hp: left, max });
+        }
+        self.set_structure(cell, None).map(Damage::Broke)
+    }
+
     /// Applies a change, whatever the cell holds now. Returns it if it changed anything.
     pub fn apply(&mut self, change: Change) -> Option<Change> {
         self.set_structure(change.cell, change.after)
@@ -304,10 +343,10 @@ mod tests {
         grid.set_terrain(rock, Terrain::Rock);
         let cell = IVec2::new(-4, 2);
         assert_eq!(grid.check_build(cell), Ok(()));
-        grid.set_structure(cell, Some(Structure::Wall));
+        grid.set_structure(cell, Some(Structure::WALL));
         assert_eq!(
             grid.check_build(cell),
-            Err(Blocked::Occupied(Structure::Wall))
+            Err(Blocked::Occupied(Structure::WALL))
         );
         assert_eq!(grid.check_build(rock), Err(Blocked::Terrain(Terrain::Rock)));
         assert_eq!(
@@ -320,19 +359,58 @@ mod tests {
     fn changes_report_what_happened() {
         let mut grid = two_by_two();
         let cell = IVec2::new(5, -7);
-        let placed = grid.set_structure(cell, Some(Structure::Wall)).unwrap();
+        let placed = grid.set_structure(cell, Some(Structure::WALL)).unwrap();
         assert_eq!(placed.before, None);
-        assert_eq!(placed.after, Some(Structure::Wall));
+        assert_eq!(placed.after, Some(Structure::WALL));
         assert_eq!(
-            grid.set_structure(cell, Some(Structure::Wall)),
+            grid.set_structure(cell, Some(Structure::WALL)),
             None,
             "no-op"
         );
         assert_eq!(grid.apply(placed.inverse()), Some(placed.inverse()));
         assert_eq!(grid.structure(cell), None);
         assert_eq!(
-            grid.set_structure(IVec2::new(999, 0), Some(Structure::Wall)),
+            grid.set_structure(IVec2::new(999, 0), Some(Structure::WALL)),
             None
+        );
+    }
+
+    #[test]
+    fn walls_wear_down_and_break() {
+        let mut grid = two_by_two();
+        let cell = IVec2::new(2, 2);
+        assert_eq!(grid.damage(cell, 5), None, "nothing to hit");
+        grid.set_structure(cell, Some(Structure::WALL));
+        let max = WALL_HP;
+        assert_eq!(
+            grid.damage(cell, 30),
+            Some(Damage::Hurt { hp: max - 30, max })
+        );
+        assert_eq!(grid.structure(cell), Some(Structure::Wall { hp: max - 30 }));
+        // The hit that takes the last HP clears the cell, and says what was there.
+        let Some(Damage::Broke(change)) = grid.damage(cell, max) else {
+            panic!("should break");
+        };
+        assert_eq!(change.before, Some(Structure::Wall { hp: max - 30 }));
+        assert_eq!(change.after, None);
+        assert_eq!(grid.structure(cell), None);
+        assert_eq!(grid.damage(cell, 1), None, "already broken");
+        // The Command Center isn't broken through the grid.
+        grid.set_structure(cell, Some(Structure::CommandCenter));
+        assert_eq!(grid.damage(cell, 1), None);
+    }
+
+    #[test]
+    fn undoing_a_removal_brings_the_damage_back() {
+        let mut grid = two_by_two();
+        let cell = IVec2::new(-3, 4);
+        grid.set_structure(cell, Some(Structure::WALL));
+        grid.damage(cell, 40);
+        let removed = grid.set_structure(cell, None).unwrap();
+        grid.apply(removed.inverse());
+        assert_eq!(
+            grid.structure(cell),
+            Some(Structure::Wall { hp: WALL_HP - 40 })
         );
     }
 

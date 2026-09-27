@@ -15,12 +15,23 @@ pub mod grid {
     pub const NEST_SIZE: i32 = 2;
 }
 
+/// Walls: what they can take before they break.
+pub mod walls {
+    pub const WALL_HP: u32 = 100;
+}
+
 /// How the horde finds its way: what each cell costs to walk through, in cells of open ground.
 pub mod flow {
-    /// A wall is passable, but costs as much as this many cells of detour. When a maze makes the
-    /// way around longer than that, the horde goes for the wall instead. A placeholder until
-    /// milestone 3 bases it on the wall's HP.
-    pub const WALL_COST: f32 = 40.0;
+    /// A wall is passable, but costs 1 plus its HP left times this many cells of detour, per
+    /// enemy class. When a maze makes the way around longer than that, the horde goes for the
+    /// wall instead. A fresh wall costs a swarmer 41 cells. Brutes break walls fast, so they'd
+    /// rather smash through than walk far. Damaged walls get cheaper, so the horde sticks with the
+    /// wall it started on.
+    pub const SWARMER_COST_PER_HP: f32 = 0.4;
+    pub const BRUTE_COST_PER_HP: f32 = 0.1;
+    /// While walls take damage, the flow fields are rebuilt at most this often (seconds). A wall
+    /// that breaks, or anything built or removed, rebuilds them right away.
+    pub const WEAR_REBUILD_INTERVAL: f32 = 0.25;
 }
 
 /// The horde: swarmers pouring out of the nests toward the Command Center.
@@ -47,6 +58,29 @@ pub mod horde {
     pub const MAX_NEIGHBORS: usize = 12;
     /// Damage a swarmer deals when it reaches the Command Center.
     pub const SWARMER_DAMAGE: u32 = 1;
+    /// A swarmer bites a wall in its way for this much, this often (seconds): 5 damage a second.
+    pub const SWARMER_BITE: u32 = 2;
+    pub const SWARMER_BITE_INTERVAL: f32 = 0.4;
+
+    /// Brutes released by one press of B, one every `BRUTE_SPAWN_INTERVAL` seconds.
+    pub const BRUTE_BATCH: u32 = 3;
+    pub const BRUTE_SPAWN_INTERVAL: f32 = 0.6;
+    /// Half a brute's width: 1.5 cells wide, too big for a 1-cell gap.
+    pub const BRUTE_RADIUS: f32 = 0.75;
+    pub const BRUTE_SPEED: f32 = 1.5;
+    /// Brutes are heavy: they turn and get up to speed slower than swarmers.
+    pub const BRUTE_STEERING_RATE: f32 = 4.0;
+    pub const BRUTE_DAMAGE: u32 = 20;
+    /// A brute smashes every wall in its way (up to two, since it needs a 2-wide hole) for this
+    /// much, this often (seconds).
+    pub const BRUTE_SMASH: u32 = 30;
+    pub const BRUTE_SMASH_INTERVAL: f32 = 1.0;
+
+    /// Enemies attack a wall they touch (within this much past touching it) when their way
+    /// leads through it: it's no further than this angle (degrees) off where they're heading,
+    /// and the flow field goes downhill through it.
+    pub const ATTACK_REACH: f32 = 0.06;
+    pub const ATTACK_ANGLE: f32 = 60.0;
 }
 
 /// The Command Center: what the horde is after.
@@ -137,11 +171,51 @@ pub mod juice {
     /// When its HP runs out: a big shake and a long flash.
     pub const BASE_FALL_SHAKE: f32 = 0.8;
     pub const BASE_FALL_FLASH_SECONDS: f32 = 0.6;
+    /// A swarmer lunges forward (radians of tilt) when it bites a wall, for this long.
+    pub const BITE_LUNGE: f32 = 0.5;
+    pub const BITE_SECONDS: f32 = 0.16;
+    /// A brute's smash: it rears up (radians) over the last moments before it, slams its head
+    /// down (radians) and squashes, bumping the camera.
+    pub const SMASH_REAR: f32 = 0.3;
+    pub const SMASH_REAR_SECONDS: f32 = 0.35;
+    pub const SMASH_DIP: f32 = 0.25;
+    pub const SMASH_SECONDS: f32 = 0.25;
+    pub const SMASH_SQUASH: f32 = -0.3;
+    pub const SMASH_SHAKE: f32 = 0.12;
+    pub const SMASH_SHAKE_MAX: f32 = 0.3;
+    /// A brute rocks from side to side as it walks (radians), a full rock every this many cells.
+    pub const BRUTE_ROCK: f32 = 0.06;
+    pub const BRUTE_STRIDE: f32 = 1.2;
+    /// A wall that's hit shudders (radians) and chips off a few concrete flecks. Only so many
+    /// walls chip a frame, however many are hit.
+    pub const WALL_HIT_WOBBLE: f32 = 0.035;
+    pub const WALL_SMASH_WOBBLE: f32 = 0.12;
+    pub const CHIP_COUNT: usize = 3;
+    pub const CHIP_SIZE: f32 = 0.07;
+    pub const CHIP_SPREAD: f32 = 1.4;
+    pub const CHIP_LIFT: f32 = 2.2;
+    pub const CHIP_LIFETIME: f32 = 0.35;
+    pub const MAX_CHIP_BURSTS: usize = 6;
+    /// Walls look cracked below this fraction of their HP, and battered below the second.
+    pub const WALL_CRACKED: f32 = 0.66;
+    pub const WALL_BATTERED: f32 = 0.33;
+    /// A wall that breaks sinks and crumbles over this long, in a big burst of rubble and dust,
+    /// and shakes the camera.
+    pub const CRUMBLE_SECONDS: f32 = 0.22;
+    pub const BREAK_RUBBLE_COUNT: usize = 14;
+    pub const BREAK_DUST_COUNT: usize = 18;
+    pub const BREAK_SHAKE: f32 = 0.25;
+    pub const BREAK_SHAKE_MAX: f32 = 0.45;
+
     /// The path preview: arrows this far apart, crawling toward the Command Center at this speed
     /// (cells per second), and flaring up for a moment when the route changes.
     pub const PREVIEW_SPACING: f32 = 0.7;
     pub const PREVIEW_CRAWL: f32 = 1.2;
     pub const PREVIEW_FLARE_SECONDS: f32 = 0.35;
+    /// Brutes' arrows are bigger and further apart.
+    pub const PREVIEW_BRUTE_SPACING: f32 = 1.3;
+    /// Breach markers pulse this many times a second.
+    pub const BREACH_PULSE_RATE: f32 = 1.6;
 
     /// Longest frame step the springs integrate at once, so a hitch can't make them explode.
     pub const MAX_SPRING_STEP: f32 = 1.0 / 30.0;

@@ -1,14 +1,19 @@
-//! The live path preview: a line of arrows crawling from each nest to the Command Center along
-//! the way the horde will go. It follows the flow field, so it changes the moment a wall is
-//! placed, removed, undone or redone, and flares up to show it did. Where the way goes through a
-//! wall (the horde would rather break it than walk around), the arrows turn red and climb over it.
+//! The live path and breach preview: a line of arrows crawling from each nest to the Command
+//! Center along the way each enemy class will go, swarmers in magenta and brutes in bigger, amber
+//! arrows. It follows the flow fields, so it changes the moment a wall is placed, removed, undone
+//! or redone, and flares up to show it did. Where a way goes through a wall (the horde would
+//! rather break it than walk around), the arrows turn red and climb over it, and a pulsing red
+//! marker sits on each wall that class will break, with a pip in the class's color.
 
-use crate::flow::{FlowField, FlowSystems};
-use crate::grid::{Grid, cell_at};
+use crate::flow::{Class, FlowFields, FlowSystems};
+use crate::grid::{Grid, cell_center};
 use crate::map::Landmarks;
 use crate::palette;
 use crate::pointer::column_top;
-use crate::tuning::juice::{PREVIEW_CRAWL, PREVIEW_FLARE_SECONDS, PREVIEW_SPACING};
+use crate::shapes::{BoxMesh, bracket_mesh};
+use crate::tuning::juice::{
+    BREACH_PULSE_RATE, PREVIEW_BRUTE_SPACING, PREVIEW_CRAWL, PREVIEW_FLARE_SECONDS, PREVIEW_SPACING,
+};
 use bevy::{
     asset::RenderAssetUsages,
     light::NotShadowCaster,
@@ -16,8 +21,9 @@ use bevy::{
     prelude::*,
 };
 
-/// Height of the arrows above whatever they cross.
+/// Height of the arrows above whatever they cross, and of the breach markers.
 const LIFT: f32 = 0.06;
+const MARKER_LIFT: f32 = 0.03;
 /// Arrows shrink in over this distance from the ends of a route.
 const FADE_LENGTH: f32 = 0.8;
 /// How much bigger the arrows get when the route changes.
@@ -27,6 +33,16 @@ const SMOOTHING: usize = 2;
 const ALPHA: f32 = 0.85;
 /// Arrows going through a wall are this much bigger, so the breach point stands out.
 const BREACH_SCALE: f32 = 1.5;
+/// Brutes' arrows are this much bigger than swarmers'.
+const BRUTE_ARROW_SCALE: f32 = 1.8;
+/// Breach markers: corner brackets a little bigger than the hover highlight's, how much they
+/// swell when they pulse, and how bright they glow.
+const MARKER: (f32, f32, f32, f32) = (0.56, 0.22, 0.08, 0.05);
+const MARKER_PULSE: f32 = 0.08;
+const MARKER_BRIGHTNESS: f32 = 1.8;
+/// The class pips on a marker: half their size, and where they sit on the wall's top.
+const PIP_SIZE: [f32; 2] = [0.07, 0.11];
+const PIP_AT: [Vec2; 2] = [Vec2::new(-0.2, 0.3), Vec2::new(0.16, 0.3)];
 
 pub struct PreviewPlugin;
 
@@ -37,8 +53,8 @@ impl Plugin for PreviewPlugin {
             .add_systems(
                 Update,
                 (
-                    trace_routes.run_if(resource_changed::<FlowField>),
-                    show_arrows,
+                    trace_routes.run_if(resource_changed::<FlowFields>),
+                    (show_arrows, show_breaches),
                 )
                     .chain()
                     .after(FlowSystems),
@@ -115,50 +131,114 @@ pub fn smooth(points: &[Vec2], passes: usize) -> Vec<Vec2> {
     points
 }
 
-/// The route from each nest, and when they last changed (real seconds).
+/// The way one class goes from one nest.
+#[derive(Clone, Debug, PartialEq)]
+struct Route {
+    class: Class,
+    line: Polyline,
+}
+
+/// A wall some class will break through, and which classes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Breach {
+    cell: IVec2,
+    /// Per class, in [`CLASSES`] order.
+    by: [bool; 2],
+}
+
+const CLASSES: [Class; 2] = [Class::Swarmer, Class::Brute];
+
+/// Each class's route from each nest, the walls they break, and when they last changed (real
+/// seconds).
 #[derive(Resource, Default)]
 struct Routes {
-    lines: Vec<Polyline>,
+    routes: Vec<Route>,
+    breaches: Vec<Breach>,
     changed_at: Option<f32>,
 }
 
 fn trace_routes(
     time: Res<Time<Real>>,
-    field: Res<FlowField>,
+    fields: Res<FlowFields>,
+    grid: Res<Grid>,
     landmarks: Res<Landmarks>,
     mut routes: ResMut<Routes>,
 ) {
-    let lines: Vec<Polyline> = landmarks
-        .nests
-        .iter()
-        .map(|nest| {
+    let mut lines = Vec::new();
+    let mut breaches: Vec<Breach> = Vec::new();
+    for (index, &class) in CLASSES.iter().enumerate() {
+        let field = fields.get(class);
+        for nest in &landmarks.nests {
             let start = nest.center().xz();
-            let cells = field.route(cell_at(nest.center()));
+            let from = field.node_at(start);
             let mut points = vec![start];
-            points.extend(cells.iter().skip(1).map(|cell| cell.as_vec2() + 0.5));
-            Polyline::new(smooth(&points, SMOOTHING))
-        })
-        .collect();
-    if lines != routes.lines {
+            points.extend(
+                field
+                    .route(from)
+                    .iter()
+                    .skip(1)
+                    .map(|&node| field.node_center(node)),
+            );
+            lines.push(Route {
+                class,
+                line: Polyline::new(smooth(&points, SMOOTHING)),
+            });
+            for cell in field.breaches(from, &grid) {
+                match breaches.iter_mut().find(|breach| breach.cell == cell) {
+                    Some(breach) => breach.by[index] = true,
+                    None => {
+                        let mut by = [false; 2];
+                        by[index] = true;
+                        breaches.push(Breach { cell, by });
+                    }
+                }
+            }
+        }
+    }
+    if lines != routes.routes || breaches != routes.breaches {
         // The very first routes aren't a change worth flaring for.
-        let first = routes.lines.is_empty();
-        routes.lines = lines;
+        let first = routes.routes.is_empty();
+        routes.routes = lines;
+        routes.breaches = breaches;
         routes.changed_at = (!first).then(|| time.elapsed_secs());
     }
+}
+
+/// How big the arrows are right after the routes change (1 when they settle).
+fn flare(routes: &Routes, now: f32) -> f32 {
+    let flare = routes.changed_at.map_or(0.0, |at| {
+        (1.0 - (now - at) / PREVIEW_FLARE_SECONDS).max(0.0)
+    });
+    1.0 + FLARE * flare * flare
 }
 
 #[derive(Resource)]
 struct PreviewAssets {
     arrow: Handle<Mesh>,
-    normal: Handle<StandardMaterial>,
+    /// Arrow materials per class, in [`CLASSES`] order, and through a wall.
+    arrows: [Handle<StandardMaterial>; 2],
     breach: Handle<StandardMaterial>,
+    marker: Handle<Mesh>,
+    marker_material: Handle<StandardMaterial>,
+    pip: Handle<Mesh>,
+    pips: [Handle<StandardMaterial>; 2],
 }
 
 impl FromWorld for PreviewAssets {
     fn from_world(world: &mut World) -> Self {
-        let arrow = world.resource_mut::<Assets<Mesh>>().add(arrow_mesh());
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        let arrow = meshes.add(arrow_mesh());
+        let (outer, arm, thickness, height) = MARKER;
+        let marker = meshes.add(bracket_mesh(outer, arm, thickness, height));
+        let mut pip = BoxMesh::default();
+        pip.cuboid(
+            Vec3::new(-1.0, 0.0, -1.0),
+            Vec3::new(1.0, 0.04, 1.0),
+            Color::WHITE,
+        );
+        let pip = meshes.add(pip.build());
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        let mut material = |color: Color| {
+        let mut see_through = |color: Color| {
             materials.add(StandardMaterial {
                 base_color: color.with_alpha(ALPHA),
                 alpha_mode: AlphaMode::Blend,
@@ -166,10 +246,31 @@ impl FromWorld for PreviewAssets {
                 ..default()
             })
         };
+        let arrows = [
+            see_through(palette::PATH_PREVIEW),
+            see_through(palette::PATH_BRUTE),
+        ];
+        let breach = see_through(palette::PATH_BREACH);
+        let mut glowing = |color: Color, brightness: f32| {
+            materials.add(StandardMaterial {
+                base_color: (color.to_linear() * brightness).with_alpha(1.0).into(),
+                unlit: true,
+                ..default()
+            })
+        };
+        let marker_material = glowing(palette::PATH_BREACH, MARKER_BRIGHTNESS);
+        let pips = [
+            glowing(palette::PATH_PREVIEW, 1.2),
+            glowing(palette::PATH_BRUTE, 1.2),
+        ];
         Self {
             arrow,
-            normal: material(palette::PATH_PREVIEW),
-            breach: material(palette::PATH_BREACH),
+            arrows,
+            breach,
+            marker,
+            marker_material,
+            pip,
+            pips,
         }
     }
 }
@@ -217,7 +318,7 @@ fn show_arrows(
     mut commands: Commands,
     time: Res<Time<Real>>,
     routes: Res<Routes>,
-    field: Res<FlowField>,
+    fields: Res<FlowFields>,
     grid: Res<Grid>,
     landmarks: Res<Landmarks>,
     assets: Res<PreviewAssets>,
@@ -232,37 +333,43 @@ fn show_arrows(
     >,
 ) {
     let now = time.elapsed_secs();
-    let crawl = (now * PREVIEW_CRAWL).rem_euclid(PREVIEW_SPACING);
-    let flare = routes.changed_at.map_or(0.0, |at| {
-        (1.0 - (now - at) / PREVIEW_FLARE_SECONDS).max(0.0)
-    });
+    let flare = flare(&routes, now);
     let base = landmarks.command_center.area();
 
     let mut wanted = Vec::new();
-    for line in &routes.lines {
+    for Route { class, line } in &routes.routes {
+        let (spacing, size, index) = match class {
+            Class::Swarmer => (PREVIEW_SPACING, 1.0, 0),
+            Class::Brute => (PREVIEW_BRUTE_SPACING, BRUTE_ARROW_SCALE, 1),
+        };
+        let field = fields.get(*class);
         let length = line.length();
-        let mut along = crawl;
+        let mut along = (now * PREVIEW_CRAWL).rem_euclid(spacing);
         while along < length {
             if let Some((at, heading)) = line.sample(along) {
-                let cell = at.floor().as_ivec2();
                 // Hidden under the Command Center, and shrinking in at both ends.
                 let fade = (along / FADE_LENGTH)
                     .min((length - along) / FADE_LENGTH)
                     .clamp(0.0, 1.0);
                 if !base.contains(at) {
-                    let breach = !field.is_clear(cell);
-                    let height = column_top(&grid, cell) + LIFT;
-                    let mut scale = fade * (1.0 + FLARE * flare * flare);
+                    let breach = !field.is_clear(field.node_at(at));
+                    let height = column_top(&grid, at.floor().as_ivec2()) + LIFT;
+                    let mut scale = fade * size * flare;
                     if breach {
                         scale *= BREACH_SCALE;
                     }
                     let transform = Transform::from_xyz(at.x, height, at.y)
                         .with_rotation(Quat::from_rotation_y((-heading.x).atan2(-heading.y)))
                         .with_scale(Vec3::splat(scale));
-                    wanted.push((transform, breach));
+                    let look = if breach {
+                        &assets.breach
+                    } else {
+                        &assets.arrows[index]
+                    };
+                    wanted.push((transform, look));
                 }
             }
-            along += PREVIEW_SPACING;
+            along += spacing;
         }
     }
 
@@ -271,7 +378,7 @@ fn show_arrows(
             .spawn((
                 Arrow,
                 Mesh3d(assets.arrow.clone()),
-                MeshMaterial3d(assets.normal.clone()),
+                MeshMaterial3d(assets.arrows[0].clone()),
                 Transform::default(),
                 Visibility::Hidden,
                 NotShadowCaster,
@@ -284,19 +391,90 @@ fn show_arrows(
         let Ok((mut transform, mut visibility, mut material)) = arrows.get_mut(entity) else {
             continue;
         };
-        let Some(&(placed, breach)) = wanted.get(i) else {
+        let Some(&(placed, look)) = wanted.get(i) else {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
         visibility.set_if_neq(Visibility::Inherited);
         *transform = placed;
-        let look = if breach {
-            &assets.breach
-        } else {
-            &assets.normal
-        };
         if material.0 != *look {
             material.0 = look.clone();
+        }
+    }
+}
+
+/// A breach marker: corner brackets on a wall, with a pip per class as children.
+#[derive(Component)]
+struct Marker {
+    pips: [Entity; 2],
+}
+
+/// Marker entities, reused from frame to frame.
+#[derive(Default)]
+struct MarkerPool(Vec<Entity>);
+
+fn show_breaches(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    routes: Res<Routes>,
+    grid: Res<Grid>,
+    assets: Res<PreviewAssets>,
+    mut pool: Local<MarkerPool>,
+    mut markers: Query<(&Marker, &mut Transform, &mut Visibility)>,
+    mut pips: Query<&mut Visibility, Without<Marker>>,
+) {
+    let now = time.elapsed_secs();
+    let pulse = 1.0 + MARKER_PULSE * (now * BREACH_PULSE_RATE * std::f32::consts::TAU).sin();
+    let scale = pulse * flare(&routes, now);
+
+    while pool.0.len() < routes.breaches.len() {
+        let pip_entities = [0, 1].map(|class| {
+            let size = PIP_SIZE[class];
+            commands
+                .spawn((
+                    Mesh3d(assets.pip.clone()),
+                    MeshMaterial3d(assets.pips[class].clone()),
+                    Transform::from_xyz(PIP_AT[class].x, 0.0, PIP_AT[class].y)
+                        .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4))
+                        .with_scale(Vec3::splat(size)),
+                    NotShadowCaster,
+                ))
+                .id()
+        });
+        let marker = commands
+            .spawn((
+                Marker { pips: pip_entities },
+                Mesh3d(assets.marker.clone()),
+                MeshMaterial3d(assets.marker_material.clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                NotShadowCaster,
+            ))
+            .add_children(&pip_entities)
+            .id();
+        pool.0.push(marker);
+    }
+    for (i, &entity) in pool.0.iter().enumerate() {
+        // Markers spawned this frame show up next frame.
+        let Ok((marker, mut transform, mut visibility)) = markers.get_mut(entity) else {
+            continue;
+        };
+        let Some(breach) = routes.breaches.get(i) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+        let top = column_top(&grid, breach.cell) + MARKER_LIFT;
+        *transform = Transform::from_translation(cell_center(breach.cell) + Vec3::Y * top)
+            .with_scale(Vec3::new(scale, 1.0, scale));
+        for (class, &pip) in marker.pips.iter().enumerate() {
+            if let Ok(mut visibility) = pips.get_mut(pip) {
+                visibility.set_if_neq(if breach.by[class] {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                });
+            }
         }
     }
 }

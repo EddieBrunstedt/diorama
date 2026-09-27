@@ -24,6 +24,7 @@ mod rng;
 mod shapes;
 mod structures;
 mod tuning;
+mod walls;
 
 use bevy::prelude::*;
 
@@ -48,6 +49,7 @@ fn main() {
             build::BuildPlugin,
             structures::StructuresPlugin,
             flow::FlowPlugin,
+            walls::WallsPlugin,
             horde::HordePlugin,
             command_center::CommandCenterPlugin,
             preview::PreviewPlugin,

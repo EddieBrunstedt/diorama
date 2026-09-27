@@ -28,6 +28,10 @@ pub const CHITIN_DARK: Color = Color::srgb(0.3, 0.1, 0.26);
 pub const ACID: Color = Color::srgb(0.75, 1.0, 0.2);
 pub const CREEP: Color = Color::srgb(0.2, 0.1, 0.19);
 pub const NEST_PIT: Color = Color::srgb(0.08, 0.03, 0.07);
+/// Brutes: darker, heavier shell than a swarmer's, with pale bone scythes and spikes.
+pub const BRUTE_SHELL: Color = Color::srgb(0.36, 0.13, 0.27);
+pub const BRUTE_PLATE: Color = Color::srgb(0.52, 0.2, 0.38);
+pub const BONE: Color = Color::srgb(0.86, 0.8, 0.66);
 /// Bits of a swarmer that bursts on the Command Center.
 pub const GIBS: [Color; 3] = [
     Color::srgb(0.62, 0.24, 0.5),
@@ -42,6 +46,10 @@ pub const DUST: [Color; 3] = [
     Color::srgb(0.52, 0.48, 0.43),
 ];
 pub const RUBBLE: [Color; 2] = [Color::srgb(0.66, 0.65, 0.62), Color::srgb(0.5, 0.49, 0.47)];
+/// Wall damage: dark cracks, the rough concrete inside, and bent rebar where chunks broke off.
+pub const CRACK: Color = Color::srgb(0.13, 0.12, 0.12);
+pub const BROKEN_CONCRETE: Color = Color::srgb(0.4, 0.39, 0.37);
+pub const REBAR: Color = Color::srgb(0.45, 0.25, 0.15);
 
 /// Hover highlight: a free cell, a cell a click can't build on, and cells being cleared.
 pub const HOVER_OK: Color = Color::srgb(0.45, 0.95, 1.0);
@@ -52,6 +60,8 @@ pub const HOVER_REMOVE: Color = Color::srgb(1.0, 0.6, 0.15);
 /// through a wall.
 pub const PATH_PREVIEW: Color = Color::srgb(0.95, 0.4, 0.85);
 pub const PATH_BREACH: Color = Color::srgb(1.0, 0.25, 0.2);
+/// The brutes' route, in amber so it doesn't mix up with the swarmers'.
+pub const PATH_BRUTE: Color = Color::srgb(1.0, 0.62, 0.2);
 
 /// The sun and the sky's fill light.
 pub const SUN: Color = Color::srgb(1.0, 0.95, 0.88);
@@ -63,3 +73,5 @@ pub const HINT_TEXT: Color = Color::srgba(0.85, 0.87, 0.9, 0.75);
 pub const HEALTH: Color = Color::srgb(0.45, 0.95, 1.0);
 pub const HEALTH_EMPTY: Color = Color::srgba(1.0, 1.0, 1.0, 0.12);
 pub const HEALTH_LOW: Color = Color::srgb(1.0, 0.3, 0.15);
+/// A hovered wall's HP bar: the backing behind it.
+pub const WALL_BAR_BACK: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
