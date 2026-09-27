@@ -11,10 +11,17 @@ use crate::tuning::juice::*;
 use bevy::{platform::collections::HashMap, prelude::*};
 
 /// A wall's height, and its width (less than a cell, so neighboring walls show a seam).
-pub const WALL_HEIGHT: f32 = 0.9;
+const WALL_HEIGHT: f32 = 0.9;
 const WALL_WIDTH: f32 = 0.92;
 /// The hazard band's bottom and top, measured down from the top of the wall.
 const HAZARD_BAND: (f32, f32) = (0.2, 0.08);
+
+/// How tall a structure stands, from the ground it's on to its top.
+pub fn structure_height(structure: Structure) -> f32 {
+    match structure {
+        Structure::Wall => WALL_HEIGHT,
+    }
+}
 
 pub struct StructuresPlugin;
 

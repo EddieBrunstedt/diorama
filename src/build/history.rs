@@ -56,6 +56,14 @@ impl Stroke {
         self.changes.iter().any(|change| change.cell == cell)
     }
 
+    /// What stood on `cell` before the stroke began, given the grid as it is now.
+    pub fn structure_before(&self, grid: &Grid, cell: IVec2) -> Option<Structure> {
+        match self.changes.iter().find(|change| change.cell == cell) {
+            Some(change) => change.before,
+            None => grid.structure(cell),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
@@ -288,6 +296,26 @@ mod tests {
         // Going back puts them up again.
         stroke.update(&mut grid, IVec2::new(2, 0));
         assert_eq!(walls(&grid), cells(&[(0, 0), (3, 0), (4, 0)]));
+    }
+
+    #[test]
+    fn a_stroke_remembers_what_stood_before_it() {
+        let mut grid = grid();
+        grid.set_structure(IVec2::new(2, 0), Some(Structure::Wall));
+        let (mut stroke, _) = Stroke::begin(WALL, IVec2::new(0, 0), &mut grid);
+        stroke.update(&mut grid, IVec2::new(3, 0));
+        let before = |x| stroke.structure_before(&grid, IVec2::new(x, 0));
+        assert_eq!(before(0), None, "placed by the stroke");
+        assert_eq!(before(2), Some(Structure::Wall), "already there");
+        assert_eq!(before(5), None, "untouched");
+
+        let (stroke, _) = Stroke::begin(StrokeKind::Remove, IVec2::new(1, 0), &mut grid);
+        assert_eq!(grid.structure(IVec2::new(1, 0)), None);
+        assert_eq!(
+            stroke.structure_before(&grid, IVec2::new(1, 0)),
+            Some(Structure::Wall),
+            "removed by the stroke"
+        );
     }
 
     #[test]

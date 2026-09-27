@@ -13,7 +13,7 @@ mod highlight;
 pub mod history;
 
 use crate::grid::{Change, Grid, Structure};
-use crate::pointer::{Pointer, PointerSystems};
+use crate::pointer::{Pointer, PointerSystems, cell_top};
 use bevy::prelude::*;
 use history::{History, Stroke, StrokeKind};
 
@@ -76,8 +76,15 @@ fn strokes(
             send(stroke.cancel(&mut grid));
             return;
         }
+        // A drag picks against the map as it was when it began: walls it places don't pull its
+        // end toward the camera, and walls it removes don't let the end slip past them.
         let mut stroke = stroke;
-        if let Some(cell) = pointer.cell {
+        let end = pointer.pick(|cell| {
+            grid.cell(cell).map_or(0.0, |data| {
+                cell_top(cell, data.terrain, stroke.structure_before(&grid, cell))
+            })
+        });
+        if let Some(cell) = end {
             send(stroke.update(&mut grid, cell));
         }
         if buttons.pressed(button) {

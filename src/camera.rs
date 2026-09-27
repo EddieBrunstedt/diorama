@@ -73,16 +73,18 @@ impl CameraRig {
         Transform::from_translation(focus + back * self.distance).looking_at(focus, Vec3::Y)
     }
 
+    /// The ray from the camera (without shake) through a screen position.
+    pub fn ray(&self, camera: &Camera, screen: Vec2) -> Option<Ray3d> {
+        camera
+            .viewport_to_world(&GlobalTransform::from(self.transform()), screen)
+            .ok()
+    }
+
     /// The ground point under a screen position.
     pub fn ground_point(&self, camera: &Camera, screen: Vec2) -> Option<Vec3> {
-        ground_point(camera, &GlobalTransform::from(self.transform()), screen)
+        self.ray(camera, screen)?
+            .plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
     }
-}
-
-/// Where a screen position's ray hits the ground plane.
-pub fn ground_point(camera: &Camera, transform: &GlobalTransform, screen: Vec2) -> Option<Vec3> {
-    let ray = camera.viewport_to_world(transform, screen).ok()?;
-    ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
 }
 
 /// The closest distance at which the whole map fits in view, looking at its middle.

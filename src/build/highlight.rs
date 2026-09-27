@@ -5,11 +5,9 @@
 use super::{ActiveStroke, BuildDenied, BuildSystems, history::StrokeKind};
 use crate::grid::{Blocked, Grid};
 use crate::juice::Squash;
-use crate::map::terrain_height;
 use crate::palette;
-use crate::pointer::Pointer;
+use crate::pointer::{Pointer, column_top};
 use crate::shapes::{BoxMesh, bracket_mesh};
-use crate::structures::WALL_HEIGHT;
 use crate::tuning::juice::{DENIED_FLASH_SECONDS, HOVER_POP};
 use bevy::{light::NotShadowCaster, prelude::*};
 
@@ -129,15 +127,6 @@ fn wanted(grid: &Grid, pointer: &Pointer, active: &ActiveStroke) -> Vec<(IVec2, 
     }
 }
 
-/// How high the top of whatever stands on a cell is.
-fn top(grid: &Grid, cell: IVec2) -> f32 {
-    match grid.cell(cell) {
-        Some(data) if data.structure.is_some() => WALL_HEIGHT,
-        Some(data) => terrain_height(cell, data.terrain),
-        None => 0.0,
-    }
-}
-
 fn show_highlights(
     mut commands: Commands,
     time: Res<Time<Real>>,
@@ -218,7 +207,7 @@ fn show_highlights(
         };
         visibility.set_if_neq(Visibility::Inherited);
         let center = crate::grid::cell_center(cell);
-        transform.translation = center + Vec3::Y * (top(&grid, cell) + LIFT);
+        transform.translation = center + Vec3::Y * (column_top(&grid, cell) + LIFT);
         let (bracket, fill) = assets.materials(look);
         if bracket_material.0 != *bracket {
             bracket_material.0 = bracket.clone();
