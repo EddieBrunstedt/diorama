@@ -12,13 +12,17 @@
 //!   - `down` / `up` presses or releases a mouse button: `left` (the default), `right` or
 //!     `middle`, e.g. `2 down right`;
 //!   - `key K` taps a key, `hold K` / `release K` keep one down (a letter, a digit, `esc`,
-//!     `space`, `ctrl` or `shift`), e.g. `3 hold ctrl; 3.1 key z; 3.2 release ctrl` to undo;
+//!     `space`, `tab`, `ctrl` or `shift`), e.g. `3 hold ctrl; 3.1 key z; 3.2 release ctrl` to
+//!     undo;
 //!   - `scroll N` scrolls N lines (positive zooms in).
-//! - `DIORAMA_SPEED=4` runs the game four times as fast (0.25 for slow motion). Screenshot and
-//!   script times are in game time, so they speed up too.
-//! - `DIORAMA_BATCH=3000` makes Space release that many swarmers at once, for testing how many
-//!   the game can take. `DIORAMA_BRUTES=10` does the same for the brutes B releases.
-//! - `DIORAMA_MONEY=5000` starts with that much money.
+//! - `DIORAMA_SPEED=4` runs the game four times as fast (0.25 for slow motion), on top of the
+//!   wave's speed toggle. Screenshot and script times are in game time, so they speed up too.
+//! - `DIORAMA_WAVE=15` starts runs at wave 15, e.g. for measuring a big wave.
+//! - `DIORAMA_BATCH=3000` makes every wave that many swarmers, for testing how many the game can
+//!   take. `DIORAMA_BRUTES=10` does the same for brutes.
+//! - `DIORAMA_MONEY=5000` starts runs with that much money.
+//! - `DIORAMA_BASE_HP=1000000` gives the Command Center that much HP, e.g. so a big wave plays
+//!   out in full for measuring.
 //! - `DIORAMA_SEED=7` fixes the random seed (see [`RunSeed`]), so scripted runs repeat.
 //! - `DIORAMA_FRAME_LOG=1` logs frame times, the size of the horde, and how long the horde's and
 //!   the towers' steps take, once a second (see [`frame_log`]).
@@ -29,10 +33,12 @@ mod frame_log;
 mod gpu;
 
 use crate::camera::{CameraRig, MainCamera};
-use crate::economy::Wallet;
+use crate::command_center::BaseHp;
+use crate::economy::StartingMoney;
 use crate::grid::cell_center;
-use crate::horde::{BatchSize, BruteBatch};
+use crate::juice::TimeScale;
 use crate::rng::RunSeed;
+use crate::waves::WaveSettings;
 use bevy::{
     input::{
         ButtonState,
@@ -79,20 +85,25 @@ impl Plugin for DevPlugin {
             .add_systems(Update, auto_screenshot);
         }
         if let Some(speed) = env_number::<f32>("DIORAMA_SPEED") {
-            app.add_systems(Startup, move |mut time: ResMut<Time<Virtual>>| {
-                time.set_relative_speed(speed);
+            app.insert_resource(TimeScale {
+                dev: speed,
+                ..default()
+            })
+            .add_systems(Startup, move |mut time: ResMut<Time<Virtual>>| {
                 // Let long frames through, so fast-forwarding doesn't slow down again.
-                time.set_max_delta(std::time::Duration::from_secs_f32(0.25 * speed));
+                time.set_max_delta(std::time::Duration::from_secs_f32(0.25 * speed.max(1.0)));
             });
         }
-        if let Some(batch) = env_number::<u32>("DIORAMA_BATCH") {
-            app.insert_resource(BatchSize(batch));
-        }
-        if let Some(brutes) = env_number::<u32>("DIORAMA_BRUTES") {
-            app.insert_resource(BruteBatch(brutes));
-        }
+        app.insert_resource(WaveSettings {
+            first: env_number("DIORAMA_WAVE"),
+            swarmers: env_number("DIORAMA_BATCH"),
+            brutes: env_number("DIORAMA_BRUTES"),
+        });
         if let Some(money) = env_number::<u32>("DIORAMA_MONEY") {
-            app.insert_resource(Wallet::new(money));
+            app.insert_resource(StartingMoney(money));
+        }
+        if let Some(hp) = env_number::<u32>("DIORAMA_BASE_HP") {
+            app.insert_resource(BaseHp(hp));
         }
         if let Some(seed) = env_number::<u64>("DIORAMA_SEED") {
             app.insert_resource(RunSeed(seed));
@@ -176,7 +187,7 @@ enum Press {
     Release,
 }
 
-/// A key by name: a letter, a digit, `esc`, `space`, `ctrl` or `shift`.
+/// A key by name: a letter, a digit, `esc`, `space`, `tab`, `ctrl` or `shift`.
 fn key_code(name: &str) -> Option<KeyCode> {
     const LETTERS: [KeyCode; 26] = [
         KeyCode::KeyA,
@@ -222,6 +233,7 @@ fn key_code(name: &str) -> Option<KeyCode> {
     let code = match name.as_str() {
         "esc" => KeyCode::Escape,
         "space" => KeyCode::Space,
+        "tab" => KeyCode::Tab,
         "ctrl" => KeyCode::ControlLeft,
         "shift" => KeyCode::ShiftLeft,
         _ => match *name.as_bytes() {

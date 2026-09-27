@@ -3,10 +3,10 @@
 //! beside it. Each smash hits every wall it's pressing against, up to the two it needs out of the
 //! way. They shove swarmers aside, and swarmers don't push back.
 //!
-//! B releases a few, until milestone 5 brings waves.
+//! They come out of the nests one at a time, leading the packs of a wave.
 
 use super::crowd::{CrowdIndex, push_out, separation, steer, touches, walls_in_the_way};
-use super::{Health, HordeReleased, HordeRng, MAX_STEP, SwarmersEmerged, facing};
+use super::{Health, HordeRng, MAX_STEP, SwarmersEmerged, Toughness, facing};
 use crate::command_center::CommandCenterHit;
 use crate::flow::{Class, FlowFields};
 use crate::juice::{Shake, Squash};
@@ -28,20 +28,9 @@ pub struct BrutePlugin;
 
 impl Plugin for BrutePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BruteBatch>()
-            .init_resource::<BruteQueue>()
+        app.init_resource::<BruteQueue>()
             .init_resource::<BruteAssets>()
             .init_resource::<BruteCrowd>();
-    }
-}
-
-/// How many brutes B releases (`DIORAMA_BRUTES` overrides it, see [`crate::dev`]).
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct BruteBatch(pub u32);
-
-impl Default for BruteBatch {
-    fn default() -> Self {
-        Self(BRUTE_BATCH)
     }
 }
 
@@ -51,6 +40,18 @@ pub struct BruteQueue {
     pub waiting: u32,
     /// Seconds until the next one comes out.
     next: f32,
+}
+
+impl BruteQueue {
+    /// Lets `count` more brutes out, one every [`BRUTE_SPAWN_INTERVAL`].
+    pub fn release(&mut self, count: u32) {
+        self.waiting += count;
+    }
+
+    /// Nothing more comes out.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[derive(Component, Clone, Debug)]
@@ -191,25 +192,13 @@ fn brute_mesh() -> Mesh {
     mesh.build()
 }
 
-pub(super) fn release_brutes(
-    keys: Res<ButtonInput<KeyCode>>,
-    batch: Res<BruteBatch>,
-    landmarks: Res<Landmarks>,
-    mut queue: ResMut<BruteQueue>,
-    mut released: MessageWriter<HordeReleased>,
-) {
-    if keys.just_pressed(KeyCode::KeyB) && !landmarks.nests.is_empty() {
-        queue.waiting += batch.0;
-        released.write(HordeReleased);
-    }
-}
-
 pub(super) fn spawn_brutes(
     mut commands: Commands,
     time: Res<Time>,
     landmarks: Res<Landmarks>,
     assets: Res<BruteAssets>,
     material: Res<ShapeMaterial>,
+    toughness: Res<Toughness>,
     mut queue: ResMut<BruteQueue>,
     mut rng: ResMut<HordeRng>,
     mut emerged: MessageWriter<SwarmersEmerged>,
@@ -240,7 +229,7 @@ pub(super) fn spawn_brutes(
             slam: 0.0,
             heading: fallback,
         },
-        Health(BRUTE_HP),
+        Health(BRUTE_HP * toughness.0),
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(material.0.clone()),
         Transform::from_xyz(at.x, -EMERGE_DEPTH, at.y)

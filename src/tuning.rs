@@ -72,11 +72,17 @@ pub mod economy {
     pub const AUTOCANNON_PRICE: u32 = 40;
     pub const FLAMER_PRICE: u32 = 50;
     pub const MORTAR_PRICE: u32 = 70;
-    /// What a kill pays, per enemy class.
-    pub const SWARMER_REWARD: u32 = 1;
+    /// A wave's swarmers share a purse: killing all of them pays this much, plus this much more
+    /// for every wave after the first, however many there are. So money doesn't grow with the
+    /// size of the horde, and every leak loses its share.
+    pub const SWARM_PURSE: f64 = 100.0;
+    pub const SWARM_PURSE_PER_WAVE: f64 = 10.0;
+    /// A brute pays a fixed bounty.
     pub const BRUTE_REWARD: u32 = 20;
-    /// Paid when the whole horde is dead (until milestone 5's waves: after each release).
+    /// Paid for clearing a wave (whether the horde died on the towers or on the Command Center),
+    /// plus this much more for every wave after the first.
     pub const WAVE_BONUS: u32 = 25;
+    pub const WAVE_BONUS_PER_WAVE: u32 = 5;
     /// Selling something built before the last wave started pays back this fraction of its price,
     /// times the fraction of its HP left. Anything built since sells for its full price (times
     /// its HP left): that's just taking it back.
@@ -84,6 +90,37 @@ pub mod economy {
     /// Repairing costs this fraction of the price for the HP put back, as a fraction of the most
     /// it can have. Always cheaper than selling and building a new one.
     pub const REPAIR_FRACTION: f32 = 0.5;
+    /// Repairing the Command Center (in the build phase) costs this much per HP put back.
+    pub const COMMAND_CENTER_REPAIR_PER_HP: f64 = 0.2;
+}
+
+/// Waves: how big they get, what's in them, and how they come out of the nests. See
+/// [`crate::waves::plan`].
+pub mod waves {
+    /// Wave 1's swarmers, and how much more each wave brings (a factor). Counts are rounded to
+    /// `ROUND_TO`.
+    pub const FIRST_SWARMERS: f64 = 100.0;
+    pub const SWARMER_GROWTH: f64 = 1.2;
+    pub const ROUND_TO: u32 = 10;
+    /// Brutes come from this wave on: one for every `WAVES_PER_BRUTE` waves after the second.
+    pub const BRUTES_FROM_WAVE: u32 = 4;
+    pub const WAVES_PER_BRUTE: u32 = 2;
+    /// Every this many waves comes a heavy wave: this many times the brutes, and this fraction of
+    /// the swarmers.
+    pub const HEAVY_EVERY: u32 = 5;
+    pub const HEAVY_BRUTES: u32 = 2;
+    pub const HEAVY_SWARMERS: f64 = 0.6;
+    /// Every enemy's HP grows by this fraction of its base HP with each wave.
+    pub const TOUGHNESS_PER_WAVE: f32 = 0.06;
+    /// A wave comes in packs: this many, plus one more every `WAVES_PER_PACK` waves.
+    pub const FIRST_PACKS: u32 = 2;
+    pub const WAVES_PER_PACK: u32 = 4;
+    /// A pack's swarmers pour out over this long (seconds), and packs start this far apart.
+    /// Brutes lead the packs after the first.
+    pub const PACK_SECONDS: f32 = 3.0;
+    pub const PACK_INTERVAL: f32 = 8.0;
+    /// The game speeds the wave phase cycles through (Tab). The build phase always runs at 1×.
+    pub const SPEEDS: [f32; 3] = [1.0, 2.0, 3.0];
 }
 
 /// How the horde finds its way: what each cell costs to walk through, in cells of open ground.
@@ -102,12 +139,6 @@ pub mod flow {
 
 /// The horde: swarmers pouring out of the nests toward the Command Center.
 pub mod horde {
-    /// Swarmers released by one press of Space (until the wave loop of milestone 5).
-    pub const BATCH: u32 = 100;
-    /// Swarmers coming out of each nest per second. Big batches come out faster, so that a
-    /// batch is always out within `BATCH_MAX_SECONDS`.
-    pub const SPAWN_RATE: f32 = 60.0;
-    pub const BATCH_MAX_SECONDS: f32 = 4.0;
     /// Top speed in cells per second, and how much it varies from swarmer to swarmer (a
     /// fraction), so the horde doesn't move in lockstep.
     pub const SWARMER_SPEED: f32 = 3.0;
@@ -122,7 +153,8 @@ pub mod horde {
     /// Each swarmer is pushed apart from at most this many neighbors a frame, so a dense pile
     /// can't make the cost explode.
     pub const MAX_NEIGHBORS: usize = 12;
-    /// What it takes to kill each class.
+    /// What it takes to kill each class (in wave 1: later waves are tougher, see
+    /// [`super::waves::TOUGHNESS_PER_WAVE`]).
     pub const SWARMER_HP: f32 = 10.0;
     pub const BRUTE_HP: f32 = 300.0;
     /// Damage a swarmer deals when it reaches the Command Center.
@@ -131,8 +163,7 @@ pub mod horde {
     pub const SWARMER_BITE: u32 = 2;
     pub const SWARMER_BITE_INTERVAL: f32 = 0.4;
 
-    /// Brutes released by one press of B, one every `BRUTE_SPAWN_INTERVAL` seconds.
-    pub const BRUTE_BATCH: u32 = 3;
+    /// Brutes come out of a nest one every this many seconds.
     pub const BRUTE_SPAWN_INTERVAL: f32 = 0.6;
     /// Half a brute's width: 1.5 cells wide, too big for a 1-cell gap.
     pub const BRUTE_RADIUS: f32 = 0.75;
@@ -237,9 +268,17 @@ pub mod juice {
     pub const GIB_LIFT: f32 = 2.6;
     pub const GIB_LIFETIME: f32 = 0.45;
     pub const MAX_GIB_BURSTS: usize = 8;
-    /// When its HP runs out: a big shake and a long flash.
-    pub const BASE_FALL_SHAKE: f32 = 0.8;
+    /// When its HP runs out, it blows up: a big shake, a long flash, a moment of slow motion
+    /// (real seconds, at this speed), and it slumps into a ruin that smokes (a puff this often,
+    /// in seconds).
+    pub const BASE_FALL_SHAKE: f32 = 1.0;
     pub const BASE_FALL_FLASH_SECONDS: f32 = 0.6;
+    pub const BASE_FALL_SLOW_MOTION: f32 = 1.2;
+    pub const BASE_FALL_SLOW_SPEED: f32 = 0.2;
+    pub const BASE_FALL_DEBRIS: usize = 60;
+    pub const RUIN_SMOKE_INTERVAL: f32 = 0.12;
+    /// The game-over screen shows up this long after the fall (real seconds).
+    pub const GAME_OVER_DELAY: f32 = 1.6;
     /// A swarmer lunges forward (radians of tilt) when it bites a wall, for this long.
     pub const BITE_LUNGE: f32 = 0.5;
     pub const BITE_SECONDS: f32 = 0.16;
@@ -327,6 +366,14 @@ pub mod juice {
     pub const BRUTE_GIB_COUNT: usize = 22;
     pub const BRUTE_DEATH_SHAKE: f32 = 0.35;
     pub const BRUTE_DEATH_HIT_STOP: f32 = 0.06;
+    /// Only one brute death in this many (real) seconds gets hit-stop, so a heavy wave dying
+    /// doesn't stutter. The shake and gibs stay on every one.
+    pub const BRUTE_HIT_STOP_COOLDOWN: f32 = 1.0;
+    /// The last kill of a wave lands with a longer hit-stop and a shake, and a banner says the
+    /// wave is cleared for this long (real seconds).
+    pub const WAVE_CLEAR_HIT_STOP: f32 = 0.15;
+    pub const WAVE_CLEAR_SHAKE: f32 = 0.3;
+    pub const WAVE_BANNER_SECONDS: f32 = 2.2;
 
     /// Money: gold pips fly from kills to the counter (at most a few a frame, and so many at
     /// once), taking this long; the counter pulses when they land. A brute's kill pops its

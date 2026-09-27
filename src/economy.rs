@@ -1,32 +1,37 @@
 //! Money: what building costs, what selling and repairs are worth, and what the horde pays when
-//! it dies. The rules are plain data ([`Wallet`], [`change_cost`] and friends); the plugin pays
-//! out kill rewards and the wave-clear bonus.
+//! it dies. The rules are plain data ([`Wallet`], [`Purse`], [`change_cost`] and friends); the
+//! plugin pays out kill rewards.
 //!
 //! Every edit to the map has a cost (negative for a refund), and the undo history keeps it, so
 //! taking an edit back gives back exactly what it took (see [`crate::build::history`]).
+//!
+//! Income doesn't grow with the size of the horde: a wave's swarmers share a purse ([`Purse`]),
+//! so each is worth less as their numbers grow. Brutes pay a fixed bounty, and clearing a wave
+//! pays a bonus ([`wave_bonus`], paid by [`crate::waves`]). Both purse and bonus grow a little
+//! with every wave.
 
 use crate::flow::Class;
-use crate::grid::{Change, Kind, Structure};
-use crate::horde::{
-    Brute, BruteQueue, DeathSystems, EnemyKilled, HordeReleased, SpawnQueue, Swarmer,
-};
+use crate::grid::{Change, CommandCenterHp, Kind, Structure};
+use crate::horde::{DeathSystems, EnemyKilled};
 use crate::tuning::economy::*;
+use crate::waves::{CurrentWave, Phase};
 use bevy::prelude::*;
 
 pub struct EconomyPlugin;
 
 impl Plugin for EconomyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Wallet>()
-            .init_resource::<WaveWatch>()
+        app.init_resource::<StartingMoney>()
+            .init_resource::<Wallet>()
+            .init_resource::<Purse>()
             .add_message::<CantAfford>()
-            .add_message::<WaveCleared>()
+            .add_message::<Earned>()
+            .add_systems(Startup, fill_wallet)
+            .add_systems(OnEnter(Phase::Wave), open_purse)
+            .add_systems(OnExit(Phase::GameOver), fill_wallet)
             .add_systems(
                 Update,
-                (pay_for_kills, pay_wave_bonus)
-                    .chain()
-                    .in_set(EconomySystems)
-                    .after(DeathSystems),
+                pay_for_kills.in_set(EconomySystems).after(DeathSystems),
             );
     }
 }
@@ -39,10 +44,22 @@ pub struct EconomySystems;
 #[derive(Message, Clone, Copy, Debug)]
 pub struct CantAfford;
 
-/// The whole horde of the last release is dead, and it paid `bonus`.
+/// A kill of `class` at `at` paid `amount` (only sent when it paid at least a coin).
 #[derive(Message, Clone, Copy, Debug)]
-pub struct WaveCleared {
-    pub bonus: u32,
+pub struct Earned {
+    pub at: Vec3,
+    pub amount: u32,
+    pub class: Class,
+}
+
+/// What a run starts with (`DIORAMA_MONEY` overrides it, see [`crate::dev`]).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct StartingMoney(pub u32);
+
+impl Default for StartingMoney {
+    fn default() -> Self {
+        Self(STARTING_MONEY)
+    }
 }
 
 /// The player's money.
@@ -84,6 +101,48 @@ impl Wallet {
     pub fn earn(&mut self, amount: u32) {
         self.money = self.money.saturating_add(amount);
     }
+}
+
+/// What a wave's swarmers pay: they share a purse, so each one is worth a fraction of a coin once
+/// there are many of them. Coins are paid out as the fractions add up.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Purse {
+    per_swarmer: f64,
+    /// Fractions of a coin earned but not paid yet.
+    owed: f64,
+}
+
+impl Purse {
+    /// `total` shared by `swarmers`.
+    pub fn new(total: f64, swarmers: u32) -> Self {
+        Self {
+            per_swarmer: if swarmers > 0 {
+                total / swarmers as f64
+            } else {
+                0.0
+            },
+            owed: 0.0,
+        }
+    }
+
+    /// A swarmer was killed: the whole coins that pays out now.
+    pub fn swarmer_killed(&mut self) -> u32 {
+        self.owed += self.per_swarmer;
+        // A hair of slack, so the fractions of an exact coin don't fall just short of it.
+        let coins = (self.owed + 1e-9).floor();
+        self.owed = (self.owed - coins).max(0.0);
+        coins as u32
+    }
+}
+
+/// What killing all of wave `number`'s swarmers pays.
+pub fn swarm_purse(number: u32) -> f64 {
+    SWARM_PURSE + SWARM_PURSE_PER_WAVE * number.saturating_sub(1) as f64
+}
+
+/// What clearing wave `number` pays.
+pub fn wave_bonus(number: u32) -> u32 {
+    WAVE_BONUS + WAVE_BONUS_PER_WAVE * number.saturating_sub(1)
 }
 
 /// What building one costs.
@@ -158,48 +217,60 @@ pub fn change_cost(change: Change) -> i64 {
     }
 }
 
-/// What killing one of `class` pays.
-pub fn kill_reward(class: Class) -> u32 {
-    match class {
-        Class::Swarmer => SWARMER_REWARD,
-        Class::Brute => BRUTE_REWARD,
+/// How far `money` repairs the Command Center: the HP it ends up with and what that costs. All
+/// the way up if there's enough, else as far as the money goes. `None` if it isn't damaged, or
+/// the money doesn't cover a single HP.
+pub fn affordable_command_center_repair(health: CommandCenterHp, money: u32) -> Option<(u32, u32)> {
+    if !health.damaged() {
+        return None;
     }
-}
-
-fn pay_for_kills(mut kills: MessageReader<EnemyKilled>, mut wallet: ResMut<Wallet>) {
-    let earned: u32 = kills.read().map(|kill| kill_reward(kill.class)).sum();
-    if earned > 0 {
-        wallet.earn(earned);
+    let full = command_center_repair_cost(health.hp, health.max);
+    if full <= money {
+        return Some((health.max, full));
     }
+    let to = (health.hp + (money as f64 / COMMAND_CENTER_REPAIR_PER_HP + 1e-9).floor() as u32)
+        .min(health.max);
+    // Rounding up can make the last HP cost a coin more than the money: step back until it fits.
+    let to = (health.hp..=to)
+        .rev()
+        .find(|&to| command_center_repair_cost(health.hp, to) <= money)?;
+    (to > health.hp).then(|| (to, command_center_repair_cost(health.hp, to)))
 }
 
-/// Whether a released horde is still out. Until milestone 5's waves, a release (Space or B)
-/// stands in for starting a wave, and the wave is cleared once all of it is dead.
-#[derive(Resource, Default, Debug)]
-struct WaveWatch {
-    active: bool,
+/// What putting the Command Center's HP back up from `from` to `to` costs, rounded up.
+pub fn command_center_repair_cost(from: u32, to: u32) -> u32 {
+    (to.saturating_sub(from) as f64 * COMMAND_CENTER_REPAIR_PER_HP - 1e-9)
+        .ceil()
+        .max(0.0) as u32
 }
 
-fn pay_wave_bonus(
-    mut released: MessageReader<HordeReleased>,
-    mut watch: ResMut<WaveWatch>,
+fn fill_wallet(start: Res<StartingMoney>, mut wallet: ResMut<Wallet>) {
+    *wallet = Wallet::new(start.0);
+}
+
+fn open_purse(wave: Res<CurrentWave>, mut purse: ResMut<Purse>) {
+    *purse = Purse::new(swarm_purse(wave.0.number), wave.0.swarmers);
+}
+
+fn pay_for_kills(
+    mut kills: MessageReader<EnemyKilled>,
     mut wallet: ResMut<Wallet>,
-    mut cleared: MessageWriter<WaveCleared>,
-    queue: Res<SpawnQueue>,
-    brute_queue: Res<BruteQueue>,
-    swarmers: Query<(), With<Swarmer>>,
-    brutes: Query<(), With<Brute>>,
+    mut purse: ResMut<Purse>,
+    mut earned: MessageWriter<Earned>,
 ) {
-    if released.read().count() > 0 {
-        watch.active = true;
-        return;
-    }
-    let out =
-        queue.waiting > 0 || brute_queue.waiting > 0 || !swarmers.is_empty() || !brutes.is_empty();
-    if watch.active && !out {
-        watch.active = false;
-        wallet.earn(WAVE_BONUS);
-        cleared.write(WaveCleared { bonus: WAVE_BONUS });
+    for kill in kills.read() {
+        let amount = match kill.class {
+            Class::Swarmer => purse.swarmer_killed(),
+            Class::Brute => BRUTE_REWARD,
+        };
+        if amount > 0 {
+            wallet.earn(amount);
+            earned.write(Earned {
+                at: kill.at,
+                amount,
+                class: kill.class,
+            });
+        }
     }
 }
 
@@ -292,6 +363,50 @@ mod tests {
             "not damaged"
         );
         assert_eq!(affordable_repair(Structure::CommandCenter, 100), None);
+    }
+
+    #[test]
+    fn swarmers_share_a_purse() {
+        // Wave 1: a coin each.
+        let mut purse = Purse::new(100.0, 100);
+        assert!((0..100).all(|_| purse.swarmer_killed() == 1));
+        // Many swarmers: all of them together still pay the purse.
+        let mut purse = Purse::new(290.0, 3190);
+        let paid: u32 = (0..3190).map(|_| purse.swarmer_killed()).sum();
+        assert_eq!(paid, 290);
+        // Fewer than the purse: more than a coin each.
+        let mut purse = Purse::new(100.0, 40);
+        let paid: u32 = (0..40).map(|_| purse.swarmer_killed()).sum();
+        assert_eq!(paid, 100);
+        assert_eq!(Purse::new(100.0, 0).swarmer_killed(), 0);
+    }
+
+    #[test]
+    fn income_grows_slowly_with_the_waves() {
+        assert_eq!(swarm_purse(1), SWARM_PURSE);
+        assert_eq!(wave_bonus(1), WAVE_BONUS);
+        assert_eq!(swarm_purse(20), SWARM_PURSE + 19.0 * SWARM_PURSE_PER_WAVE);
+        assert_eq!(wave_bonus(20), WAVE_BONUS + 19 * WAVE_BONUS_PER_WAVE);
+    }
+
+    #[test]
+    fn command_center_repairs_go_as_far_as_the_money() {
+        let worn = CommandCenterHp { hp: 600, max: 1000 };
+        let full = command_center_repair_cost(600, 1000);
+        assert_eq!(full, (400.0 * COMMAND_CENTER_REPAIR_PER_HP).ceil() as u32);
+        assert_eq!(
+            affordable_command_center_repair(worn, 10_000),
+            Some((1000, full))
+        );
+        let (to, cost) = affordable_command_center_repair(worn, 7).unwrap();
+        assert!(to > 600 && to < 1000 && cost <= 7, "{to} for {cost}");
+        assert_eq!(affordable_command_center_repair(worn, 0), None, "broke");
+        let whole = CommandCenterHp {
+            hp: 1000,
+            max: 1000,
+        };
+        assert_eq!(affordable_command_center_repair(whole, 100), None);
+        assert_eq!(command_center_repair_cost(999, 1000), 1, "never free");
     }
 
     #[test]

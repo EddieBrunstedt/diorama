@@ -1,14 +1,14 @@
-//! The money counter in the top-left corner. Kills send gold pips flying to it (a few a frame),
-//! and it pulses as they land. A brute's kill, and a cleared wave, pop their reward over the map.
+//! The money counter in the top-left corner. Kills that pay a coin send gold pips flying to it (a
+//! few a frame), and it pulses as they land. A brute's kill, and a cleared wave, pop their reward over the map.
 //! When something can't be paid for, the counter flashes red and shakes.
 
 use crate::camera::MainCamera;
-use crate::economy::{CantAfford, EconomySystems, Wallet, WaveCleared, kill_reward};
+use crate::economy::{CantAfford, Earned, EconomySystems, Wallet};
 use crate::flow::Class;
-use crate::horde::EnemyKilled;
 use crate::map::Landmarks;
 use crate::palette;
 use crate::tuning::juice::*;
+use crate::waves::{WaveCleared, WaveSystems};
 use bevy::prelude::*;
 
 const FONT_SIZE: f32 = 22.0;
@@ -29,7 +29,8 @@ impl Plugin for MoneyPlugin {
             Update,
             (send_pips, fly_pips, pop_rewards, show_counter)
                 .chain()
-                .after(EconomySystems),
+                .after(EconomySystems)
+                .after(WaveSystems),
         );
     }
 }
@@ -94,16 +95,16 @@ fn counter_position(counter: (&UiGlobalTransform, &ComputedNode)) -> Vec2 {
 
 fn send_pips(
     mut commands: Commands,
-    mut killed: MessageReader<EnemyKilled>,
+    mut earned: MessageReader<Earned>,
     camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
     pips: Query<(), With<Pip>>,
 ) {
     let (camera, transform) = *camera;
     let mut alive = pips.iter().len();
     let mut sent = 0;
-    for kill in killed.read() {
+    for kill in earned.read() {
         if kill.class == Class::Brute {
-            commands.spawn(pop(kill.at, kill_reward(kill.class)));
+            commands.spawn(pop(kill.at, kill.amount));
         }
         if sent >= MAX_PIPS_PER_FRAME || alive >= MAX_PIPS {
             continue;

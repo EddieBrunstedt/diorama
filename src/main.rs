@@ -26,6 +26,7 @@ mod shapes;
 mod structures;
 mod towers;
 mod tuning;
+mod waves;
 mod wear;
 
 use bevy::prelude::*;
@@ -54,6 +55,7 @@ fn main() {
             wear::WearPlugin,
             towers::TowersPlugin,
             economy::EconomyPlugin,
+            waves::WavesPlugin,
         ))
         .add_plugins((
             horde::HordePlugin,

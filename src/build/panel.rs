@@ -1,11 +1,12 @@
-//! The build panel along the bottom of the screen: a button per thing to build, with its hotkey
-//! and price. The chosen one is outlined, and prices the money doesn't cover turn red. Clicking a
-//! button picks it, like its hotkey.
+//! The build panel in the bottom-left corner, in the build phase: a button per thing to
+//! build, with its hotkey and price. The chosen one is outlined, and prices the money doesn't
+//! cover turn red. Clicking a button picks it, like its hotkey.
 
 use super::{TOOL_KEYS, Tool};
 use crate::economy::{Wallet, price};
 use crate::grid::Kind;
 use crate::palette;
+use crate::waves::Phase;
 use bevy::prelude::*;
 
 const FONT_SIZE: f32 = 14.0;
@@ -16,16 +17,25 @@ pub struct PanelPlugin;
 
 impl Plugin for PanelPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PanelHovered>()
+        app.init_resource::<UiHovered>()
             .add_systems(Startup, spawn_panel)
-            .add_systems(PreUpdate, press_buttons.after(bevy::ui::UiSystems::Focus))
+            .add_systems(OnEnter(Phase::Build), show_panel::<true>)
+            .add_systems(OnExit(Phase::Build), show_panel::<false>)
+            .add_systems(
+                PreUpdate,
+                (press_buttons, hover_ui).after(bevy::ui::UiSystems::Focus),
+            )
             .add_systems(Update, show_buttons);
     }
 }
 
-/// Whether the cursor is over the panel, so clicks there don't build on the map behind it.
+/// Whether the cursor is over a button (the panel's, or the HUD's), so clicks there don't build
+/// on the map behind it.
 #[derive(Resource, Default, Debug, PartialEq, Eq)]
-pub struct PanelHovered(pub bool);
+pub struct UiHovered(pub bool);
+
+#[derive(Component)]
+struct Panel;
 
 #[derive(Component, Clone, Copy)]
 struct PanelButton(Kind);
@@ -44,11 +54,12 @@ fn spawn_panel(mut commands: Commands) {
     };
     commands
         .spawn((
+            Panel,
             Node {
                 position_type: PositionType::Absolute,
                 bottom: Val::Px(12.0),
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
+                // On the left, leaving the right to the wave box (see `hud`).
+                left: Val::Px(14.0),
                 column_gap: Val::Px(6.0),
                 ..default()
             },
@@ -87,23 +98,33 @@ fn spawn_panel(mut commands: Commands) {
         });
 }
 
-fn press_buttons(
-    buttons: Query<(&PanelButton, &Interaction)>,
-    mut tool: ResMut<Tool>,
-    mut hovered: ResMut<PanelHovered>,
-) {
-    let mut over = false;
+/// The panel is only there in the build phase.
+fn show_panel<const SHOWN: bool>(mut panels: Query<&mut Visibility, With<Panel>>) {
+    for mut panel in &mut panels {
+        panel.set_if_neq(if SHOWN {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+}
+
+fn press_buttons(buttons: Query<(&PanelButton, &Interaction)>, mut tool: ResMut<Tool>) {
     for (button, interaction) in &buttons {
-        match interaction {
-            Interaction::Pressed => {
-                over = true;
-                tool.set_if_neq(Tool(button.0));
-            }
-            Interaction::Hovered => over = true,
-            Interaction::None => {}
+        if *interaction == Interaction::Pressed {
+            tool.set_if_neq(Tool(button.0));
         }
     }
-    hovered.set_if_neq(PanelHovered(over));
+}
+
+fn hover_ui(
+    buttons: Query<(&Interaction, &InheritedVisibility), With<Button>>,
+    mut hovered: ResMut<UiHovered>,
+) {
+    let over = buttons
+        .iter()
+        .any(|(interaction, visible)| visible.get() && *interaction != Interaction::None);
+    hovered.set_if_neq(UiHovered(over));
 }
 
 fn show_buttons(

@@ -1,5 +1,6 @@
 //! Enemies dying: whatever ran out of [`Health`] in the damage step is cleared away and bursts
-//! into gibs. A brute goes down hard: a big burst, a heavy shake and a moment of hit-stop.
+//! into gibs. A brute goes down hard: a big burst, a heavy shake and a moment of hit-stop (at
+//! most one a second, so a heavy wave dying doesn't stutter).
 
 use super::{Brute, DamageSystems, Health};
 use crate::flow::Class;
@@ -53,10 +54,12 @@ fn remove_dead(
 
 fn burst_into_gibs(
     mut commands: Commands,
+    real: Res<Time<Real>>,
     mut killed: MessageReader<EnemyKilled>,
     mut particles: Particles,
     mut shake: ResMut<Shake>,
     mut hit_stop: ResMut<HitStop>,
+    mut last_stop: Local<Option<f32>>,
 ) {
     // A few bursts a frame read as a massacre; a whole pile bursting at once would flood the map.
     let mut bursts = 0;
@@ -96,7 +99,11 @@ fn burst_into_gibs(
                     },
                 );
                 shake.add(BRUTE_DEATH_SHAKE);
-                hit_stop.add(BRUTE_DEATH_HIT_STOP);
+                let now = real.elapsed_secs();
+                if last_stop.is_none_or(|last| now - last >= BRUTE_HIT_STOP_COOLDOWN) {
+                    *last_stop = Some(now);
+                    hit_stop.add(BRUTE_DEATH_HIT_STOP);
+                }
             }
         }
     }

@@ -2,7 +2,10 @@
 //! undo/redo history of finished strokes. Money goes with every change: a stroke only does what
 //! the wallet can pay for, and undo gives back exactly what an edit took.
 
-use crate::economy::{Wallet, affordable_repair, change_cost};
+use crate::economy::{
+    Wallet, affordable_command_center_repair, affordable_repair, change_cost,
+    command_center_repair_cost,
+};
 use crate::grid::{Change, Grid, Kind, Structure};
 use bevy::prelude::*;
 
@@ -28,10 +31,80 @@ pub enum StrokeKind {
     Remove,
 }
 
-/// One change a stroke made to the grid, and what it cost (negative if it paid back).
+/// Something a stroke did to the map: changed what stands on a cell, or put HP back on the
+/// Command Center (whose HP belongs to the whole building, not to a cell).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Cell(Change),
+    /// Repaired the Command Center from `from` HP to `to`, through `cell`, one of its cells.
+    CommandCenter {
+        cell: IVec2,
+        from: u32,
+        to: u32,
+    },
+}
+
+impl Action {
+    /// The cell it acted on.
+    pub fn cell(self) -> IVec2 {
+        match self {
+            Action::Cell(change) => change.cell,
+            Action::CommandCenter { cell, .. } => cell,
+        }
+    }
+
+    /// The change to a cell, if that's what it was.
+    pub fn change(self) -> Option<Change> {
+        match self {
+            Action::Cell(change) => Some(change),
+            Action::CommandCenter { .. } => None,
+        }
+    }
+
+    /// The action that takes it back.
+    pub fn inverse(self) -> Self {
+        match self {
+            Action::Cell(change) => Action::Cell(change.inverse()),
+            Action::CommandCenter { cell, from, to } => Action::CommandCenter {
+                cell,
+                from: to,
+                to: from,
+            },
+        }
+    }
+
+    /// Whether the map still holds what it left behind, so it can be taken back.
+    fn holds(self, grid: &Grid) -> bool {
+        match self {
+            Action::Cell(change) => grid.structure(change.cell) == change.after,
+            Action::CommandCenter { to, .. } => grid.command_center.hp == to,
+        }
+    }
+
+    /// Whether the map holds what it starts from, so it can be done (again).
+    fn can_apply(self, grid: &Grid) -> bool {
+        self.inverse().holds(grid)
+    }
+
+    /// Does it, if the map still holds what it starts from. Returns it if anything changed.
+    fn apply(self, grid: &mut Grid) -> Option<Action> {
+        match self {
+            Action::Cell(change) => grid.apply(change).map(Action::Cell),
+            Action::CommandCenter { from, to, .. } => {
+                if grid.command_center.hp != from || from == to {
+                    return None;
+                }
+                grid.command_center.hp = to;
+                Some(self)
+            }
+        }
+    }
+}
+
+/// One thing a stroke did, and what it cost (negative if it paid back).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Entry {
-    pub change: Change,
+    pub action: Action,
     pub cost: i64,
 }
 
@@ -55,7 +128,7 @@ impl Stroke {
         start: IVec2,
         grid: &mut Grid,
         wallet: &mut Wallet,
-    ) -> (Self, Vec<Change>) {
+    ) -> (Self, Vec<Action>) {
         let mut stroke = Self {
             kind,
             start,
@@ -74,13 +147,18 @@ impl Stroke {
 
     /// Whether the stroke changed `cell`.
     pub fn changed(&self, cell: IVec2) -> bool {
-        self.entries.iter().any(|entry| entry.change.cell == cell)
+        self.entries.iter().any(|entry| entry.action.cell() == cell)
     }
 
     /// What stood on `cell` before the stroke began, given the grid as it is now.
     pub fn structure_before(&self, grid: &Grid, cell: IVec2) -> Option<Structure> {
-        match self.entries.iter().find(|entry| entry.change.cell == cell) {
-            Some(entry) => entry.change.before,
+        let change = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.action.change())
+            .find(|change| change.cell == cell);
+        match change {
+            Some(change) => change.before,
             None => grid.structure(cell),
         }
     }
@@ -95,8 +173,8 @@ impl Stroke {
     }
 
     /// Moves the stroke's end to `end`: takes back what left the line and acts on the new
-    /// cells. Returns the changes made to the grid, in order.
-    pub fn update(&mut self, grid: &mut Grid, wallet: &mut Wallet, end: IVec2) -> Vec<Change> {
+    /// cells. Returns what it did to the map, in order.
+    pub fn update(&mut self, grid: &mut Grid, wallet: &mut Wallet, end: IVec2) -> Vec<Action> {
         self.end = end;
         let cells = line(self.start, end);
         let mut applied = Vec::new();
@@ -104,11 +182,11 @@ impl Stroke {
         // Newest first, so the grid steps back through the same states it went through.
         let mut kept = Vec::new();
         for entry in self.entries.drain(..).rev() {
-            if cells.contains(&entry.change.cell) {
+            if cells.contains(&entry.action.cell()) {
                 kept.push(entry);
             } else if let Some(undone) = take_back(entry, grid, wallet) {
                 applied.push(undone);
-            } else if grid.structure(entry.change.cell) == entry.change.after {
+            } else if entry.action.holds(grid) {
                 // Couldn't pay back a sale: it stays part of the stroke.
                 kept.push(entry);
             }
@@ -127,9 +205,9 @@ impl Stroke {
                 self.short = true;
                 continue;
             }
-            if let Some(change) = grid.apply(entry.change) {
+            if let Some(action) = entry.action.apply(grid) {
                 self.entries.push(entry);
-                applied.push(change);
+                applied.push(action);
             }
         }
         applied
@@ -138,6 +216,9 @@ impl Stroke {
     /// What the stroke would do to `cell` with `money` to spend, if anything.
     fn act_on(&mut self, grid: &Grid, money: u32, cell: IVec2) -> Option<Entry> {
         let before = grid.structure(cell);
+        if self.kind == StrokeKind::Repair && before == Some(Structure::CommandCenter) {
+            return self.repair_command_center(grid, money, cell);
+        }
         let after = match self.kind {
             StrokeKind::Place(kind) => {
                 grid.check_build(cell).ok()?;
@@ -164,13 +245,39 @@ impl Stroke {
             after,
         };
         Some(Entry {
-            change,
+            action: Action::Cell(change),
             cost: change_cost(change),
         })
     }
 
-    /// Takes back everything the stroke did. Returns the changes made to the grid.
-    pub fn cancel(mut self, grid: &mut Grid, wallet: &mut Wallet) -> Vec<Change> {
+    /// Repairs the Command Center through `cell` (once a stroke, however many of its cells the
+    /// line crosses), as far as `money` goes.
+    fn repair_command_center(&mut self, grid: &Grid, money: u32, cell: IVec2) -> Option<Entry> {
+        let health = grid.command_center;
+        let repaired = self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.action, Action::CommandCenter { .. }));
+        if repaired || !health.damaged() {
+            return None;
+        }
+        let Some((to, cost)) = affordable_command_center_repair(health, money) else {
+            self.short = true;
+            return None;
+        };
+        debug_assert_eq!(cost, command_center_repair_cost(health.hp, to));
+        Some(Entry {
+            action: Action::CommandCenter {
+                cell,
+                from: health.hp,
+                to,
+            },
+            cost: cost as i64,
+        })
+    }
+
+    /// Takes back everything the stroke did. Returns what that did to the map.
+    pub fn cancel(mut self, grid: &mut Grid, wallet: &mut Wallet) -> Vec<Action> {
         self.entries
             .drain(..)
             .rev()
@@ -186,13 +293,13 @@ impl Stroke {
     }
 }
 
-/// Undoes one entry, giving back what it cost (or paying back what it paid), if the cell still
+/// Undoes one entry, giving back what it cost (or paying back what it paid), if the map still
 /// holds what it left there and the money allows.
-fn take_back(entry: Entry, grid: &mut Grid, wallet: &mut Wallet) -> Option<Change> {
-    if grid.structure(entry.change.cell) != entry.change.after || !wallet.pay(-entry.cost) {
+fn take_back(entry: Entry, grid: &mut Grid, wallet: &mut Wallet) -> Option<Action> {
+    if !entry.action.holds(grid) || !wallet.pay(-entry.cost) {
         return None;
     }
-    grid.apply(entry.change.inverse())
+    entry.action.inverse().apply(grid)
 }
 
 /// One undo step: the changes it made, in order, with their costs.
@@ -207,7 +314,7 @@ impl Edit {
     fn undo_cost(&self, grid: &Grid) -> i64 {
         self.entries
             .iter()
-            .filter(|entry| grid.structure(entry.change.cell) == entry.change.after)
+            .filter(|entry| entry.action.holds(grid))
             .map(|entry| -entry.cost)
             .sum()
     }
@@ -216,7 +323,7 @@ impl Edit {
     fn redo_cost(&self, grid: &Grid) -> i64 {
         self.entries
             .iter()
-            .filter(|entry| grid.structure(entry.change.cell) == entry.change.before)
+            .filter(|entry| entry.action.can_apply(grid))
             .map(|entry| entry.cost)
             .sum()
     }
@@ -244,14 +351,14 @@ impl History {
         self.redo.clear();
     }
 
-    /// Takes back the last edit, with its money. Returns the changes made to the grid (empty if
+    /// Takes back the last edit, with its money. Returns what that did to the map (empty if
     /// there was nothing to undo). Changes that no longer hold (e.g. a wall the horde broke since)
     /// are skipped, and so is their money. If the edit can't be paid for, nothing happens.
     pub fn undo(
         &mut self,
         grid: &mut Grid,
         wallet: &mut Wallet,
-    ) -> Result<Vec<Change>, TooExpensive> {
+    ) -> Result<Vec<Action>, TooExpensive> {
         let Some(edit) = self.undo.last() else {
             return Ok(Vec::new());
         };
@@ -263,18 +370,18 @@ impl History {
             .entries
             .iter()
             .rev()
-            .filter_map(|entry| grid.apply(entry.change.inverse()))
+            .filter_map(|entry| entry.action.inverse().apply(grid))
             .collect();
         self.redo.push(edit);
         Ok(applied)
     }
 
-    /// Does the last undone edit again, with its money. Returns the changes made to the grid.
+    /// Does the last undone edit again, with its money. Returns what that did to the map.
     pub fn redo(
         &mut self,
         grid: &mut Grid,
         wallet: &mut Wallet,
-    ) -> Result<Vec<Change>, TooExpensive> {
+    ) -> Result<Vec<Action>, TooExpensive> {
         let Some(edit) = self.redo.last() else {
             return Ok(Vec::new());
         };
@@ -285,7 +392,7 @@ impl History {
         let applied = edit
             .entries
             .iter()
-            .filter_map(|entry| grid.apply(entry.change))
+            .filter_map(|entry| entry.action.apply(grid))
             .collect();
         self.undo.push(edit);
         Ok(applied)
@@ -361,7 +468,7 @@ mod tests {
         let mut wallet = rich();
         let (stroke, changes) = Stroke::begin(WALL, IVec2::new(3, 4), &mut grid, &mut wallet);
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].after, Some(Structure::WALL));
+        assert_eq!(changes[0].change().unwrap().after, Some(Structure::WALL));
         assert!(!stroke.is_empty());
         assert_eq!(walls(&grid), cells(&[(3, 4)]));
     }
@@ -374,7 +481,7 @@ mod tests {
         grid.set_structure(IVec2::new(5, 1), Some(Structure::WALL));
         let (mut stroke, _) = Stroke::begin(WALL, IVec2::new(1, 1), &mut grid, &mut wallet);
         let changes = stroke.update(&mut grid, &mut wallet, IVec2::new(6, 2));
-        let placed: Vec<IVec2> = changes.iter().map(|change| change.cell).collect();
+        let placed: Vec<IVec2> = changes.iter().map(|action| action.cell()).collect();
         assert_eq!(
             placed,
             cells(&[(2, 1), (4, 1), (6, 1)]),
@@ -394,8 +501,8 @@ mod tests {
         stroke.update(&mut grid, &mut wallet, IVec2::new(4, 1));
         let changes = stroke.update(&mut grid, &mut wallet, IVec2::new(2, 1));
         assert_eq!(changes.len(), 2);
-        assert!(changes.iter().all(|change| change.after.is_none()));
-        assert_eq!(changes[0].cell, IVec2::new(4, 1), "newest first");
+        assert!(changes.iter().all(|a| a.change().unwrap().after.is_none()));
+        assert_eq!(changes[0].cell(), IVec2::new(4, 1), "newest first");
         assert_eq!(walls(&grid), cells(&[(1, 1), (2, 1)]));
 
         stroke.update(&mut grid, &mut wallet, IVec2::new(1, 3));
@@ -516,7 +623,7 @@ mod tests {
         assert_eq!(grid, one_line);
         let undone = history.undo(&mut grid, &mut wallet).unwrap();
         assert_eq!(undone.len(), 4);
-        assert_eq!(undone[0].cell, IVec2::new(3, 0), "newest first");
+        assert_eq!(undone[0].cell(), IVec2::new(3, 0), "newest first");
         assert_eq!(grid, empty);
         assert!(!history.can_undo());
         assert!(history.undo(&mut grid, &mut wallet).unwrap().is_empty());
@@ -676,7 +783,7 @@ mod tests {
         let (mut stroke, changes) =
             Stroke::begin(StrokeKind::Repair, IVec2::new(0, 0), &mut grid, &mut wallet);
         assert_eq!(changes.len(), 1);
-        assert!(changes[0].is_repair());
+        assert!(changes[0].change().unwrap().is_repair());
         let changes = stroke.update(&mut grid, &mut wallet, IVec2::new(3, 0));
         assert_eq!(changes.len(), 1, "only the damaged ones");
         let health = |grid: &Grid, x| grid.structure(IVec2::new(x, 0)).unwrap().health().unwrap();
@@ -687,6 +794,58 @@ mod tests {
         stroke.cancel(&mut grid, &mut wallet);
         assert_eq!(wallet.money(), 1000);
         assert_eq!(health(&grid, 0).0, 75);
+    }
+
+    #[test]
+    fn repairing_the_command_center_is_an_edit() {
+        let mut grid = grid();
+        let mut wallet = Wallet::new(1000);
+        let mut history = History::default();
+        let base = [IVec2::new(2, 2), IVec2::new(3, 2)];
+        for cell in base {
+            grid.set_structure(cell, Some(Structure::CommandCenter));
+        }
+        grid.set_structure(IVec2::new(4, 2), Some(Structure::WALL));
+        grid.damage(IVec2::new(4, 2), 50);
+        grid.command_center.damage(400);
+        let cost = command_center_repair_cost(600, 1000);
+
+        // A line across both of its cells and a worn wall: the building is repaired once.
+        let (mut stroke, changes) =
+            Stroke::begin(StrokeKind::Repair, base[0], &mut grid, &mut wallet);
+        assert_eq!(
+            changes,
+            vec![Action::CommandCenter {
+                cell: base[0],
+                from: 600,
+                to: 1000
+            }]
+        );
+        let changes = stroke.update(&mut grid, &mut wallet, IVec2::new(4, 2));
+        assert_eq!(changes.len(), 1, "just the wall");
+        let wall_cost = crate::economy::repair_cost(Kind::Wall, 50, 100);
+        assert_eq!(grid.command_center.hp, 1000);
+        assert_eq!(wallet.money(), 1000 - cost - wall_cost);
+        history.record(stroke.finish());
+
+        history.undo(&mut grid, &mut wallet).unwrap();
+        assert_eq!(grid.command_center.hp, 600);
+        assert_eq!(wallet.money(), 1000);
+        history.redo(&mut grid, &mut wallet).unwrap();
+        assert_eq!(grid.command_center.hp, 1000);
+        assert_eq!(wallet.money(), 1000 - cost - wall_cost);
+
+        // Whole: nothing to repair. Broke: as far as the money goes.
+        let (stroke, _) = Stroke::begin(StrokeKind::Repair, base[1], &mut grid, &mut wallet);
+        assert!(stroke.is_empty());
+        grid.command_center.damage(500);
+        let mut wallet = Wallet::new(10);
+        let (mut stroke, _) = Stroke::begin(StrokeKind::Repair, base[1], &mut grid, &mut wallet);
+        assert!(grid.command_center.hp > 500 && grid.command_center.hp < 1000);
+        assert_eq!(wallet.money(), 0);
+        assert!(!stroke.take_short(), "spent it all on what it could");
+        stroke.cancel(&mut grid, &mut wallet);
+        assert_eq!((grid.command_center.hp, wallet.money()), (500, 10));
     }
 
     #[test]

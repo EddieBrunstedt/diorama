@@ -1,16 +1,18 @@
-//! The hover highlight: corner brackets and a faint fill on the cell under the cursor, or on
-//! every cell of a drag. The color says what a left click does there: build (cyan), repair
-//! (green, over something damaged), or nothing (red, also when the money doesn't cover it). Over
-//! something built and whole, it's orange: a right click sells it.
+//! The hover highlight, in the build phase: corner brackets and a faint fill on the cell under
+//! the cursor, or on every cell of a drag. The color says what a left click does there: build
+//! (cyan), repair (green, over something damaged, the Command Center too), or nothing (red, also
+//! when the money doesn't cover it). Over something built and whole, it's orange: a right click
+//! sells it.
 
 use super::{ActiveStroke, BuildDenied, BuildSystems, Tool, history::StrokeKind};
-use crate::economy::{Wallet, affordable_repair, price};
-use crate::grid::{Blocked, Grid};
+use crate::economy::{Wallet, affordable_command_center_repair, affordable_repair, price};
+use crate::grid::{Blocked, Grid, Structure};
 use crate::juice::Squash;
 use crate::palette;
 use crate::pointer::{Pointer, column_top};
 use crate::shapes::{BoxMesh, bracket_mesh};
 use crate::tuning::juice::{DENIED_FLASH_SECONDS, HOVER_POP};
+use crate::waves::Phase;
 use bevy::{light::NotShadowCaster, prelude::*};
 
 /// Bracket shape: half size, corner arm length, thickness and height.
@@ -115,6 +117,15 @@ fn wanted(
             .map(|cell| {
                 let look = match grid.check_build(cell) {
                     Ok(()) if wallet.money() >= price(tool.0) => Look::Build,
+                    Err(Blocked::Occupied(Structure::CommandCenter))
+                        if grid.command_center.damaged() =>
+                    {
+                        match affordable_command_center_repair(grid.command_center, wallet.money())
+                        {
+                            Some(_) => Look::Repair,
+                            None => Look::Blocked,
+                        }
+                    }
                     Err(Blocked::Occupied(structure)) if structure.damaged() => {
                         if affordable_repair(structure, wallet.money()).is_some() {
                             Look::Repair
@@ -148,6 +159,7 @@ fn wanted(
 fn show_highlights(
     mut commands: Commands,
     time: Res<Time<Real>>,
+    phase: Res<State<Phase>>,
     grid: Res<Grid>,
     pointer: Res<Pointer>,
     active: Res<ActiveStroke>,
@@ -167,7 +179,12 @@ fn show_highlights(
     mut last_cursor: Local<Option<IVec2>>,
     mut flash: Local<Option<(IVec2, f32)>>,
 ) {
-    let mut wanted = wanted(&grid, &pointer, &active, *tool, *wallet);
+    // Only the build phase has anything for a click to do.
+    let mut wanted = if *phase.get() == Phase::Build {
+        wanted(&grid, &pointer, &active, *tool, *wallet)
+    } else {
+        Vec::new()
+    };
 
     // A refused click flashes the cell red for a moment and pops the brackets.
     let mut pop = None;

@@ -1,6 +1,6 @@
 //! Range rings: how far a tower reaches, shown around the cell under the cursor when a click
-//! would build a tower there, and around a tower the cursor is on. A mortar also shows how close
-//! it can't reach.
+//! would build a tower there (in the build phase), and around a tower the cursor is on. A mortar
+//! also shows how close it can't reach.
 
 use crate::build::{ActiveStroke, BuildSystems, Tool};
 use crate::grid::{Grid, Kind, cell_center};
@@ -8,6 +8,7 @@ use crate::palette;
 use crate::pointer::Pointer;
 use crate::shapes::ring_mesh;
 use crate::tuning::towers::{AUTOCANNON_RANGE, FLAMER_RANGE, MORTAR_MIN_RANGE, MORTAR_RANGE};
+use crate::waves::Phase;
 use bevy::{light::NotShadowCaster, platform::collections::HashMap, prelude::*};
 
 /// How thick a ring's line is, and how high over the ground it floats.
@@ -88,6 +89,7 @@ fn spawn_rings(
 
 fn show_rings(
     pointer: Res<Pointer>,
+    phase: Res<State<Phase>>,
     grid: Res<Grid>,
     tool: Res<Tool>,
     active: Res<ActiveStroke>,
@@ -101,7 +103,7 @@ fn show_rings(
         .and_then(|cell| {
             let kind = match grid.structure(cell) {
                 Some(structure) => structure.kind()?,
-                None if grid.check_build(cell).is_ok() => tool.0,
+                None if *phase.get() == Phase::Build && grid.check_build(cell).is_ok() => tool.0,
                 None => return None,
             };
             Some((cell, reach(kind)?))

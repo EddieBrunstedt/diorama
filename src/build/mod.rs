@@ -1,16 +1,18 @@
-//! Building with the mouse. Every click changes the grid right away, and pays for it.
+//! Building with the mouse, in the build phase. Every click changes the grid right away, and
+//! pays for it.
 //!
 //! - 1–4 (or the build panel, [`panel`]) pick what a left click builds: a wall or one of the
 //!   towers.
 //! - Left click builds it. Drag to draw a straight line (it follows the axis you dragged further
 //!   along); structures appear and disappear live as the line changes, until the money runs out.
-//! - Left click on a damaged wall or tower repairs it, as far as the money goes (drag to repair
-//!   along a line).
+//! - Left click on a damaged wall or tower, or on the Command Center, repairs it, as far as the
+//!   money goes (drag to repair along a line).
 //! - Right click sells, and right drag sells along a line.
 //! - Esc, or the other mouse button, cancels a drag in progress.
 //! - Ctrl+Z undoes the last click or drag, Ctrl+Shift+Z (or Ctrl+Y) redoes, money and all.
-//! - Releasing the horde stands in for starting a wave (until milestone 5): it commits what was
-//!   built, which now sells at a loss, and clears the undo history.
+//! - Starting the wave commits what was built, which now sells at a loss, and clears the undo
+//!   history. Nothing can be built, sold or repaired until the wave is over.
+//! - A new run clears away everything built.
 //!
 //! The rules and the history are plain data in [`history`] (and the prices in
 //! [`crate::economy`]). Whatever changes the grid sends a [`StructureChanged`] for each cell,
@@ -20,13 +22,14 @@ mod highlight;
 pub mod history;
 mod panel;
 
+use crate::command_center::CommandCenterRepaired;
 use crate::economy::{CantAfford, Wallet};
-use crate::grid::{Change, Grid, Kind};
-use crate::horde::HordeReleased;
+use crate::grid::{Change, Grid, Kind, Structure};
 use crate::pointer::{Pointer, PointerSystems, cell_top};
+use crate::waves::Phase;
 use bevy::prelude::*;
-use history::{History, Stroke, StrokeKind};
-pub use panel::PanelHovered;
+use history::{Action, History, Stroke, StrokeKind};
+pub use panel::UiHovered;
 
 pub struct BuildPlugin;
 
@@ -38,10 +41,13 @@ impl Plugin for BuildPlugin {
             .add_message::<StructureChanged>()
             .add_message::<BuildDenied>()
             .add_plugins((highlight::HighlightPlugin, panel::PanelPlugin))
+            .add_systems(OnEnter(Phase::Wave), commit)
+            .add_systems(OnExit(Phase::GameOver), clear_the_map)
             .add_systems(
                 Update,
-                (commit, pick_tool, strokes, undo_redo)
+                (pick_tool, strokes, undo_redo)
                     .chain()
+                    .run_if(in_state(Phase::Build))
                     .in_set(BuildSystems)
                     .after(PointerSystems),
             );
@@ -89,15 +95,46 @@ fn pick_tool(keys: Res<ButtonInput<KeyCode>>, mut tool: ResMut<Tool>) {
     }
 }
 
-/// Letting the horde out commits the build: it sells at a loss from now on, and can't be undone.
-fn commit(
-    mut released: MessageReader<HordeReleased>,
+/// Starting the wave commits the build: it sells at a loss from now on, and can't be undone. A
+/// drag still in progress keeps what it did.
+fn commit(mut grid: ResMut<Grid>, mut history: ResMut<History>, mut active: ResMut<ActiveStroke>) {
+    active.0 = None;
+    grid.commit();
+    history.clear();
+}
+
+/// A new run: everything built is gone (the Command Center stands up again in
+/// [`crate::command_center`]).
+fn clear_the_map(
     mut grid: ResMut<Grid>,
     mut history: ResMut<History>,
+    mut active: ResMut<ActiveStroke>,
+    mut changed: MessageWriter<StructureChanged>,
 ) {
-    if released.read().count() > 0 {
-        grid.commit();
-        history.clear();
+    active.0 = None;
+    history.clear();
+    changed.write_batch(grid.clear_built().into_iter().map(StructureChanged));
+}
+
+/// Tells whatever follows the map what an edit did.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Report<'w> {
+    changed: MessageWriter<'w, StructureChanged>,
+    repaired: MessageWriter<'w, CommandCenterRepaired>,
+}
+
+impl Report<'_> {
+    fn send(&mut self, actions: Vec<Action>) {
+        for action in actions {
+            match action {
+                Action::Cell(change) => {
+                    self.changed.write(StructureChanged(change));
+                }
+                Action::CommandCenter { from, to, .. } => {
+                    self.repaired.write(CommandCenterRepaired { from, to });
+                }
+            }
+        }
     }
 }
 
@@ -106,17 +143,16 @@ fn strokes(
     keys: Res<ButtonInput<KeyCode>>,
     pointer: Res<Pointer>,
     tool: Res<Tool>,
-    panel: Res<PanelHovered>,
+    ui: Res<UiHovered>,
     mut grid: ResMut<Grid>,
     mut wallet: ResMut<Wallet>,
     mut active: ResMut<ActiveStroke>,
     mut history: ResMut<History>,
-    mut changed: MessageWriter<StructureChanged>,
+    mut report: Report,
     mut denied: MessageWriter<BuildDenied>,
     mut broke: MessageWriter<CantAfford>,
 ) {
-    let mut send =
-        |changes: Vec<Change>| changed.write_batch(changes.into_iter().map(StructureChanged));
+    let mut send = |actions: Vec<Action>| report.send(actions);
 
     if let Some((stroke, button)) = active.0.take() {
         let other = match button {
@@ -149,8 +185,8 @@ fn strokes(
         return;
     }
 
-    // Clicks on the build panel are for the panel.
-    if panel.0 {
+    // Clicks on the build panel and the buttons are for them.
+    if ui.0 {
         return;
     }
     let Some(cell) = pointer.cell else {
@@ -159,7 +195,10 @@ fn strokes(
     // A left click on something damaged repairs it; anywhere else it builds.
     let damaged = grid
         .structure(cell)
-        .is_some_and(|structure| structure.damaged());
+        .is_some_and(|structure| match structure {
+            Structure::CommandCenter => grid.command_center.damaged(),
+            structure => structure.damaged(),
+        });
     let left = if damaged {
         StrokeKind::Repair
     } else {
@@ -190,7 +229,7 @@ fn undo_redo(
     mut grid: ResMut<Grid>,
     mut wallet: ResMut<Wallet>,
     mut history: ResMut<History>,
-    mut changed: MessageWriter<StructureChanged>,
+    mut report: Report,
     mut broke: MessageWriter<CantAfford>,
 ) {
     // Finish (or cancel) the drag first, so undo never tangles with a half-drawn line.
@@ -210,9 +249,7 @@ fn undo_redo(
         return;
     };
     match changes {
-        Ok(changes) => {
-            changed.write_batch(changes.into_iter().map(StructureChanged));
-        }
+        Ok(actions) => report.send(actions),
         Err(_) => {
             broke.write(CantAfford);
         }

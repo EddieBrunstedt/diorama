@@ -3,10 +3,13 @@
 //! wall, they stop at it and attack it until it breaks. One that reaches the Command Center dies
 //! on it and deals damage.
 //!
-//! Space releases a batch of swarmers and B a few brutes ([`brute`]), until milestone 5 brings
-//! waves. Thousands of swarmers can be on the map at once: they share one mesh and one material
-//! so they're drawn in a few batches, move in parallel, and find their neighbors through a
-//! spatial hash ([`crowd`], plain data). Towers find their targets through the same hash
+//! The wave loop ([`crate::waves`]) lets them out in packs through [`SpawnQueue`] and
+//! [`BruteQueue`], and each wave's enemies are tougher ([`Toughness`]). Once the Command Center
+//! has fallen, the horde swarms over its ruin instead of bursting on it.
+//!
+//! Thousands of swarmers can be on the map at once: they share one mesh and one material so
+//! they're drawn in a few batches, move in parallel, and find their neighbors through a spatial
+//! hash ([`crowd`], plain data). Towers find their targets through the same hash
 //! ([`EnemyIndex`]).
 //!
 //! Every enemy has [`Health`]. Whatever hurts them runs in [`DamageSystems`], and the ones that
@@ -27,9 +30,10 @@ use crate::tuning::horde::*;
 use crate::tuning::juice::{
     BITE_LUNGE, BITE_SECONDS, EMERGE_DEPTH, EMERGE_SECONDS, SCUTTLE_HOP, SCUTTLE_STRIDE,
 };
+use crate::waves::{CurrentWave, Phase};
 use crate::wear::StructureHit;
 use bevy::{ecs::system::SystemParam, prelude::*, utils::Parallel};
-pub use brute::{Brute, BruteBatch, BruteQueue};
+pub use brute::{Brute, BruteQueue};
 use crowd::{CrowdIndex, push_out, separation, shove, steer, touches, walls_in_the_way};
 pub use death::{DeathSystems, EnemyKilled};
 
@@ -40,28 +44,29 @@ pub struct HordePlugin;
 
 impl Plugin for HordePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BatchSize>()
-            .init_resource::<SpawnQueue>()
+        app.init_resource::<SpawnQueue>()
+            .init_resource::<Toughness>()
             .init_resource::<SwarmerAssets>()
             .init_resource::<ShapeMaterial>()
             .init_resource::<Crowd>()
             .add_message::<SwarmersEmerged>()
-            .add_message::<HordeReleased>()
             .add_plugins((nest::NestPlugin, brute::BrutePlugin, death::DeathPlugin))
             .configure_sets(Update, DamageSystems.after(HordeSystems))
             .add_systems(Startup, seed_horde)
+            .add_systems(OnEnter(Phase::Wave), toughen)
+            .add_systems(OnEnter(Phase::GameOver), stop_spawning)
+            .add_systems(OnExit(Phase::GameOver), (stop_spawning, clear_horde))
             .add_systems(
                 Update,
                 (
-                    release_batch,
                     spawn_swarmers,
-                    brute::release_brutes,
                     brute::spawn_brutes,
                     // Brutes first: swarmers get out of their way.
                     brute::move_brutes,
                     move_swarmers,
-                    reach_command_center,
-                    brute::reach_command_center,
+                    // Once it has fallen, the horde swarms over the ruin.
+                    (reach_command_center, brute::reach_command_center)
+                        .run_if(not(in_state(Phase::GameOver))),
                 )
                     .chain()
                     .in_set(HordeSystems)
@@ -78,11 +83,6 @@ pub struct HordeSystems;
 /// cleared away after it.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DamageSystems;
-
-/// The player let the horde out (Space or B). Until milestone 5's waves, that stands in for
-/// starting a wave: it commits the build.
-#[derive(Message, Clone, Copy, Debug)]
-pub struct HordeReleased;
 
 /// What an enemy has left. At zero or below it's dead, and cleared away at the end of the damage
 /// step.
@@ -129,13 +129,13 @@ impl EnemyIndex<'_> {
     }
 }
 
-/// How many swarmers Space releases (`DIORAMA_BATCH` overrides it, see [`crate::dev`]).
+/// How much tougher than in wave 1 the enemies coming out now are: their HP is multiplied by it.
 #[derive(Resource, Clone, Copy, Debug)]
-pub struct BatchSize(pub u32);
+pub struct Toughness(pub f32);
 
-impl Default for BatchSize {
+impl Default for Toughness {
     fn default() -> Self {
-        Self(BATCH)
+        Self(1.0)
     }
 }
 
@@ -147,6 +147,20 @@ pub struct SpawnQueue {
     rate: f32,
     /// Fractions of a swarmer owed from earlier frames.
     owed: f32,
+}
+
+impl SpawnQueue {
+    /// Lets `count` more swarmers out, pouring out of the nests over `seconds` (along with any
+    /// still waiting).
+    pub fn release(&mut self, count: u32, seconds: f32) {
+        self.waiting += count;
+        self.rate = self.waiting as f32 / seconds.max(0.01);
+    }
+
+    /// Nothing more comes out.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Swarmers came out of a nest this frame.
@@ -257,20 +271,20 @@ impl Default for Crowd {
     }
 }
 
-fn release_batch(
-    keys: Res<ButtonInput<KeyCode>>,
-    batch: Res<BatchSize>,
-    landmarks: Res<Landmarks>,
-    mut queue: ResMut<SpawnQueue>,
-    mut released: MessageWriter<HordeReleased>,
-) {
-    if !keys.just_pressed(KeyCode::Space) || landmarks.nests.is_empty() {
-        return;
+fn toughen(wave: Res<CurrentWave>, mut toughness: ResMut<Toughness>) {
+    toughness.0 = wave.0.toughness;
+}
+
+fn stop_spawning(mut swarmers: ResMut<SpawnQueue>, mut brutes: ResMut<BruteQueue>) {
+    swarmers.clear();
+    brutes.clear();
+}
+
+/// A new run: the horde left from the last one is gone.
+fn clear_horde(mut commands: Commands, enemies: Query<Entity, With<Health>>) {
+    for entity in &enemies {
+        commands.entity(entity).despawn();
     }
-    queue.waiting += batch.0;
-    released.write(HordeReleased);
-    let steady = SPAWN_RATE * landmarks.nests.len() as f32;
-    queue.rate = steady.max(queue.waiting as f32 / BATCH_MAX_SECONDS);
 }
 
 fn spawn_swarmers(
@@ -279,6 +293,7 @@ fn spawn_swarmers(
     landmarks: Res<Landmarks>,
     assets: Res<SwarmerAssets>,
     material: Res<ShapeMaterial>,
+    toughness: Res<Toughness>,
     mut queue: ResMut<SpawnQueue>,
     mut rng: ResMut<HordeRng>,
     mut emerged: MessageWriter<SwarmersEmerged>,
@@ -315,7 +330,7 @@ fn spawn_swarmers(
                     bite_cooldown: rng.range(0.0, SWARMER_BITE_INTERVAL),
                     lunge: 0.0,
                 },
-                Health(SWARMER_HP),
+                Health(SWARMER_HP * toughness.0),
                 Mesh3d(assets.mesh.clone()),
                 MeshMaterial3d(material.0.clone()),
                 Transform::from_xyz(at.x, -EMERGE_DEPTH, at.y)

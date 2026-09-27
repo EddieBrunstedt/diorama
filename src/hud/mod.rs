@@ -1,18 +1,23 @@
-//! On-screen text: the money in the top-left corner ([`money`]), the Command Center's health and
-//! the size of the horde at the top, a controls hint under the money, and a small HP
-//! bar over the wall or tower under the cursor, with what selling or repairing it would pay or
-//! cost. Undo and redo dim when there's nothing to undo or redo.
+//! On-screen text: the money in the top-left corner ([`money`]), the Command Center's health, the
+//! phase and the size of the horde at the top, a controls hint for the phase under the money, the
+//! wave preview and the game-over screen ([`wave`]), and a small HP bar over the wall, tower or
+//! Command Center under the cursor, with what selling or repairing it would pay or cost (in the
+//! build phase). Undo and redo dim when there's nothing to undo or redo.
 
 mod money;
+mod wave;
 
 use crate::build::history::History;
 use crate::camera::MainCamera;
-use crate::command_center::CommandCenterHealth;
-use crate::economy::{Wallet, affordable_repair, sell_value};
-use crate::grid::{Grid, cell_center};
+use crate::economy::{
+    Wallet, affordable_command_center_repair, affordable_repair, command_center_repair_cost,
+    sell_value,
+};
+use crate::grid::{Grid, Structure, cell_center};
 use crate::horde::{Brute, BruteQueue, SpawnQueue, Swarmer};
 use crate::palette;
 use crate::pointer::{Pointer, PointerSystems, column_top};
+use crate::waves::{CurrentWave, Phase};
 use bevy::prelude::*;
 
 const FONT_SIZE: f32 = 15.0;
@@ -33,15 +38,11 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(money::MoneyPlugin)
+        app.add_plugins((money::MoneyPlugin, wave::WaveHudPlugin))
             .add_systems(Startup, (spawn_hint, spawn_status, spawn_wall_bar))
             .add_systems(
                 Update,
-                (
-                    dim_undo_redo,
-                    show_status,
-                    show_wall_bar.after(PointerSystems),
-                ),
+                (show_hint, show_status, show_wall_bar.after(PointerSystems)),
             );
     }
 }
@@ -51,6 +52,9 @@ struct HealthFill;
 
 #[derive(Component)]
 struct HealthText;
+
+#[derive(Component)]
+struct PhaseText;
 
 #[derive(Component)]
 struct SwarmerCount;
@@ -99,30 +103,59 @@ fn spawn_status(mut commands: Commands) {
                     BackgroundColor(palette::HEALTH),
                     Pickable::IGNORE,
                 ));
+            status.spawn((PhaseText, text("")));
             status.spawn((SwarmerCount, text("")));
         });
 }
 
 fn show_status(
-    health: Res<CommandCenterHealth>,
+    grid: Res<Grid>,
+    phase: Res<State<Phase>>,
+    wave: Res<CurrentWave>,
     queue: Res<SpawnQueue>,
     brute_queue: Res<BruteQueue>,
     swarmers: Query<(), With<Swarmer>>,
     brutes: Query<(), With<Brute>>,
     mut fill: Single<(&mut Node, &mut BackgroundColor), With<HealthFill>>,
-    mut health_text: Single<&mut Text, (With<HealthText>, Without<SwarmerCount>)>,
-    mut count_text: Single<&mut Text, (With<SwarmerCount>, Without<HealthText>)>,
+    mut texts: ParamSet<(
+        Single<&mut Text, With<HealthText>>,
+        Single<&mut Text, With<PhaseText>>,
+        Single<(&mut Text, &mut Node), (With<SwarmerCount>, Without<HealthFill>)>,
+    )>,
 ) {
-    if health.is_changed() {
-        let fraction = health.hp as f32 / health.max.max(1) as f32;
-        let (node, color) = &mut *fill;
-        node.width = Val::Percent(fraction * 100.0);
-        color.0 = if fraction < LOW_HEALTH {
-            palette::HEALTH_LOW
-        } else {
-            palette::HEALTH
-        };
-        health_text.0 = format!("Command Center  {} / {}", health.hp, health.max);
+    let health = grid.command_center;
+    let fraction = health.hp as f32 / health.max.max(1) as f32;
+    let (node, color) = &mut *fill;
+    node.width = Val::Percent(fraction * 100.0);
+    color.0 = if fraction < LOW_HEALTH {
+        palette::HEALTH_LOW
+    } else {
+        palette::HEALTH
+    };
+    let label = format!("Command Center  {} / {}", health.hp, health.max);
+    let mut health_text = texts.p0();
+    if health_text.0 != label {
+        health_text.0 = label;
+    }
+    let label = match phase.get() {
+        Phase::Build => format!("Build phase  -  wave {} next", wave.0.number),
+        Phase::Wave => format!("Wave {}", wave.0.number),
+        Phase::GameOver => "Overrun".to_string(),
+    };
+    let mut phase_text = texts.p1();
+    if phase_text.0 != label {
+        phase_text.0 = label;
+    }
+    // The horde's size, while there is one.
+    let mut count_text = texts.p2();
+    let (count_text, count_node) = &mut *count_text;
+    let display = if *phase.get() == Phase::Build {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    if count_node.display != display {
+        count_node.display = display;
     }
     let count = |name: &str, alive: usize, waiting: u32| {
         if waiting > 0 {
@@ -143,6 +176,8 @@ fn show_status(
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum HintLine {
+    /// Only in this phase.
+    In(Phase),
     Always,
     Undo,
     Redo,
@@ -162,19 +197,16 @@ fn spawn_hint(mut commands: Commands) {
             Pickable::IGNORE,
         ))
         .with_children(|hint| {
+            let build = HintLine::In(Phase::Build);
             for (line, text) in [
-                (HintLine::Always, "1-4: pick what to build"),
-                (
-                    HintLine::Always,
-                    "Left click: build, or repair (drag for a line)",
-                ),
-                (HintLine::Always, "Right click: sell (drag for a line)"),
-                (
-                    HintLine::Always,
-                    "Space: release swarmers    B: release brutes",
-                ),
+                (build, "1-4: pick what to build"),
+                (build, "Left click: build, or repair (drag for a line)"),
+                (build, "Right click: sell (drag for a line)"),
+                (build, "Space: start the wave"),
                 (HintLine::Undo, "Ctrl+Z: undo"),
                 (HintLine::Redo, "Ctrl+Shift+Z: redo"),
+                (HintLine::In(Phase::Wave), "Tab: game speed"),
+                (HintLine::In(Phase::GameOver), "R: restart"),
                 (HintLine::Always, "WASD / middle drag: pan    Scroll: zoom"),
             ] {
                 hint.spawn((
@@ -188,16 +220,27 @@ fn spawn_hint(mut commands: Commands) {
         });
 }
 
-fn dim_undo_redo(history: Res<History>, mut lines: Query<(&HintLine, &mut TextColor)>) {
-    if !history.is_changed() {
+/// Shows the lines for the phase, and dims undo and redo when there's nothing to undo or redo.
+fn show_hint(
+    history: Res<History>,
+    phase: Res<State<Phase>>,
+    mut lines: Query<(&HintLine, &mut TextColor, &mut Node)>,
+) {
+    if !history.is_changed() && !phase.is_changed() {
         return;
     }
-    for (line, mut color) in &mut lines {
-        let usable = match line {
-            HintLine::Always => true,
-            HintLine::Undo => history.can_undo(),
-            HintLine::Redo => history.can_redo(),
+    let building = *phase.get() == Phase::Build;
+    for (line, mut color, mut node) in &mut lines {
+        let (shown, usable) = match *line {
+            HintLine::In(only) => (only == *phase.get(), true),
+            HintLine::Always => (true, true),
+            HintLine::Undo => (building, history.can_undo()),
+            HintLine::Redo => (building, history.can_redo()),
         };
+        let display = if shown { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
         let alpha = palette::HINT_TEXT.alpha() * if usable { 1.0 } else { DIMMED_ALPHA };
         color.set_if_neq(TextColor(palette::HINT_TEXT.with_alpha(alpha)));
     }
@@ -268,10 +311,11 @@ fn spawn_wall_bar(mut commands: Commands) {
         });
 }
 
-/// Floats an HP bar over the wall or tower under the cursor, with what it sells for and what a
-/// repair would cost.
+/// Floats an HP bar over the wall, tower or Command Center under the cursor, with what it sells
+/// for and what a repair would cost in the build phase.
 fn show_wall_bar(
     pointer: Res<Pointer>,
+    phase: Res<State<Phase>>,
     grid: Res<Grid>,
     wallet: Res<Wallet>,
     camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
@@ -282,10 +326,13 @@ fn show_wall_bar(
 ) {
     let (node, visibility, computed) = &mut *bar;
     let (camera, transform) = *camera;
-    // Only structures the horde can break have HP to show.
+    // Only what the horde can break has HP to show.
     let above = pointer.cell.and_then(|cell| {
         let structure = grid.structure(cell)?;
-        let health = structure.health()?;
+        let health = match structure {
+            Structure::CommandCenter => (grid.command_center.hp, grid.command_center.max),
+            structure => structure.health()?,
+        };
         let top = cell_center(cell) + Vec3::Y * (column_top(&grid, cell) + WALL_BAR_LIFT);
         let at = camera.world_to_viewport(transform, top).ok()?;
         Some((at, structure, health))
@@ -307,20 +354,37 @@ fn show_wall_bar(
     } else {
         palette::HEALTH
     };
-    let name = structure.kind().map_or("", |kind| kind.name());
+    let name = structure
+        .kind()
+        .map_or("Command Center", |kind| kind.name());
     let label = format!("{name}  {hp} / {max}");
     if text.0 != label {
         text.0 = label;
     }
-    let mut label = format!("sell +{}", sell_value(structure));
-    if structure.damaged() {
-        let full = crate::economy::repair_cost(structure.kind().unwrap_or_default(), hp, max);
-        let repair = match affordable_repair(structure, wallet.money()) {
-            Some((to, cost)) if to < max => format!("repair -{cost} (to {to})"),
-            Some((_, cost)) => format!("repair -{cost}"),
-            None => format!("repair -{full}"),
+    // Prices only matter while there's building to do.
+    let command_center = structure == Structure::CommandCenter;
+    let mut label = String::new();
+    if *phase.get() == Phase::Build {
+        let (full, affordable) = if command_center {
+            (
+                command_center_repair_cost(hp, max),
+                affordable_command_center_repair(grid.command_center, wallet.money()),
+            )
+        } else {
+            label = format!("sell +{}", sell_value(structure));
+            (
+                crate::economy::repair_cost(structure.kind().unwrap_or_default(), hp, max),
+                affordable_repair(structure, wallet.money()),
+            )
         };
-        label = format!("{label}   {repair}");
+        if hp < max {
+            let repair = match affordable {
+                Some((to, cost)) if to < max => format!("repair -{cost} (to {to})"),
+                Some((_, cost)) => format!("repair -{cost}"),
+                None => format!("repair -{full}"),
+            };
+            label = format!("{label}   {repair}").trim().to_string();
+        }
     }
     if prices.0 != label {
         prices.0 = label;

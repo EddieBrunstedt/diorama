@@ -4,6 +4,7 @@
 //! in any direction. Cell `(x, y)` covers the world square from `(x, 0, y)` to `(x + 1, 0, y + 1)`:
 //! grid `y` runs along world `+Z`, toward the camera.
 
+use crate::tuning::command_center::MAX_HP as COMMAND_CENTER_HP;
 use crate::tuning::grid::CHUNK_SIZE;
 use crate::tuning::structures::{AUTOCANNON_HP, FLAMER_HP, MORTAR_HP, WALL_HP};
 use bevy::{platform::collections::HashMap, prelude::*};
@@ -90,7 +91,7 @@ pub enum Structure {
         committed: bool,
     },
     /// Part of the Command Center: what the horde is after. It's there from the start and can't
-    /// be removed. Its HP is kept for the whole building (see `command_center`).
+    /// be removed. Its HP is kept for the whole building, in [`Grid::command_center`].
     CommandCenter,
 }
 
@@ -269,10 +270,47 @@ impl Change {
     }
 }
 
+/// The Command Center's HP: what it has left, and the most it can have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandCenterHp {
+    pub hp: u32,
+    pub max: u32,
+}
+
+impl Default for CommandCenterHp {
+    fn default() -> Self {
+        Self {
+            hp: COMMAND_CENTER_HP,
+            max: COMMAND_CENTER_HP,
+        }
+    }
+}
+
+impl CommandCenterHp {
+    /// Takes `damage`. Returns true if that used up the last of its HP.
+    pub fn damage(&mut self, damage: u32) -> bool {
+        let before = self.hp;
+        self.hp = self.hp.saturating_sub(damage);
+        before > 0 && self.hp == 0
+    }
+
+    pub fn damaged(self) -> bool {
+        self.hp < self.max
+    }
+
+    pub fn fallen(self) -> bool {
+        self.hp == 0
+    }
+}
+
 /// The whole map.
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub struct Grid {
     chunks: HashMap<IVec2, Chunk>,
+    /// The Command Center's HP, for the whole building (it stands on several cells). It's kept
+    /// with the map so that repairing it is an edit like any other, and can be undone (see
+    /// [`crate::build::history`]).
+    pub command_center: CommandCenterHp,
 }
 
 impl Grid {
@@ -385,6 +423,31 @@ impl Grid {
         }
     }
 
+    /// Clears away everything the player built (a new run). Returns the changes.
+    pub fn clear_built(&mut self) -> Vec<Change> {
+        let cells: Vec<IVec2> = self
+            .chunks
+            .iter()
+            .flat_map(|(&at, chunk)| {
+                let origin = Self::chunk_origin(at);
+                chunk
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, cell)| {
+                        let index = index as i32;
+                        let local = IVec2::new(index % CHUNK_SIZE, index / CHUNK_SIZE);
+                        matches!(cell.structure, Some(Structure::Built { .. }))
+                            .then_some(origin + local)
+                    })
+            })
+            .collect();
+        cells
+            .into_iter()
+            .filter_map(|cell| self.set_structure(cell, None))
+            .collect()
+    }
+
     /// The smallest rectangle of cells covering the whole map (`max` inclusive).
     pub fn bounds(&self) -> Option<IRect> {
         self.chunks.keys().fold(None, |bounds, &chunk| {
@@ -418,6 +481,34 @@ mod tests {
             }
         }
         grid
+    }
+
+    #[test]
+    fn clearing_the_built_leaves_the_command_center() {
+        let mut grid = two_by_two();
+        let base = IVec2::new(-1, -1);
+        grid.set_structure(base, Some(Structure::CommandCenter));
+        let built = [IVec2::new(-5, 3), IVec2::new(7, -9), IVec2::new(0, 0)];
+        for cell in built {
+            grid.set_structure(cell, Some(Structure::new(Kind::Mortar)));
+        }
+        let mut cleared: Vec<IVec2> = grid.clear_built().iter().map(|c| c.cell).collect();
+        cleared.sort_by_key(|cell| (cell.x, cell.y));
+        let mut expected = built.to_vec();
+        expected.sort_by_key(|cell| (cell.x, cell.y));
+        assert_eq!(cleared, expected);
+        assert!(built.iter().all(|&cell| grid.structure(cell).is_none()));
+        assert_eq!(grid.structure(base), Some(Structure::CommandCenter));
+    }
+
+    #[test]
+    fn the_command_center_falls_once() {
+        let mut hp = CommandCenterHp { hp: 3, max: 3 };
+        assert!(!hp.damage(2));
+        assert!(hp.damaged());
+        assert!(hp.damage(2), "the hit that takes the last HP");
+        assert!(hp.fallen());
+        assert!(!hp.damage(1), "already down");
     }
 
     #[test]

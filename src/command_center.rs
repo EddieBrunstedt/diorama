@@ -1,33 +1,74 @@
 //! The Command Center: the heart of the outpost and what the horde is after. It stands in the
-//! middle of the map from the start, as a structure on its cells (see [`Landmarks`]).
+//! middle of the map from the start, as a structure on its cells (see [`Landmarks`]). Its HP is
+//! kept with the map ([`Grid::command_center`]), and it can be repaired in the build phase like
+//! anything built.
 //!
 //! A swarmer that reaches it bursts on it and deals damage: the building flinches and flashes,
-//! and gibs fly. When its HP runs out it flashes hard and refills, until milestone 5 makes that
-//! the end of the run.
+//! and gibs fly. When its HP runs out it blows up in slow motion and slumps into a smoking ruin:
+//! the run is over ([`CommandCenterFell`]). A new run drops a fresh one in.
 
+use crate::grid::{CommandCenterHp, Grid};
 use crate::horde::HordeSystems;
-use crate::juice::{Burst, Particles, Shake, Squash};
+use crate::juice::{
+    Burst, HitStop, Particles, Shake, Spray, Squash, Tween, TweenDone, TweenTarget,
+};
 use crate::map::Landmarks;
 use crate::palette;
 use crate::shapes::{BoxMesh, shade};
 use crate::tuning::command_center::MAX_HP;
 use crate::tuning::juice::*;
+use crate::waves::{Phase, WaveSystems};
 use bevy::prelude::*;
 
 /// How tall it stands (to the top of its antenna).
 pub const HEIGHT: f32 = 1.5;
 /// How bright the hit flash glows at its peak.
 const FLASH_BRIGHTNESS: f32 = 2.5;
+/// A ruin is wider and much lower than the building, and charred.
+const RUIN_SCALE: Vec3 = Vec3::new(1.12, 0.32, 1.12);
+const RUIN_SHADE: f32 = 0.35;
+/// A new one drops in from this high, taking this long (seconds).
+const DROP_HEIGHT: f32 = 12.0;
+const DROP_SECONDS: f32 = 0.3;
 
 pub struct CommandCenterPlugin;
 
 impl Plugin for CommandCenterPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CommandCenterHealth>()
+        app.init_resource::<BaseHp>()
             .add_message::<CommandCenterHit>()
-            .add_systems(Startup, spawn_command_center)
-            .add_systems(Update, (take_hits, flash).chain().after(HordeSystems));
+            .add_message::<CommandCenterFell>()
+            .add_message::<CommandCenterRepaired>()
+            .add_systems(Startup, (spawn_command_center, stand_up))
+            .add_systems(OnExit(Phase::GameOver), (drop_in_a_new_one, stand_up))
+            .add_systems(
+                Update,
+                (take_hits, show_repairs, flash, smoke)
+                    .chain()
+                    .after(HordeSystems)
+                    .before(WaveSystems),
+            )
+            .add_observer(land);
     }
+}
+
+/// What a run's Command Center starts with (`DIORAMA_BASE_HP` overrides it, see
+/// [`crate::dev`]).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct BaseHp(pub u32);
+
+impl Default for BaseHp {
+    fn default() -> Self {
+        Self(MAX_HP)
+    }
+}
+
+/// A run starts with the Command Center whole.
+fn stand_up(base: Res<BaseHp>, mut grid: ResMut<Grid>) {
+    grid.command_center = CommandCenterHp {
+        hp: base.0,
+        max: base.0,
+    };
 }
 
 /// Something reached the Command Center at `at` and hit it.
@@ -37,28 +78,15 @@ pub struct CommandCenterHit {
     pub damage: u32,
 }
 
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct CommandCenterHealth {
-    pub hp: u32,
-    pub max: u32,
-}
+/// The Command Center's HP ran out: the run is over.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct CommandCenterFell;
 
-impl Default for CommandCenterHealth {
-    fn default() -> Self {
-        Self {
-            hp: MAX_HP,
-            max: MAX_HP,
-        }
-    }
-}
-
-impl CommandCenterHealth {
-    /// Takes `damage`. Returns true if that used up the last of its HP.
-    pub fn damage(&mut self, damage: u32) -> bool {
-        let before = self.hp;
-        self.hp = self.hp.saturating_sub(damage);
-        before > 0 && self.hp == 0
-    }
+/// The player repaired the Command Center (or undid a repair) from `from` HP to `to`.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct CommandCenterRepaired {
+    pub from: u32,
+    pub to: u32,
 }
 
 #[derive(Component)]
@@ -68,6 +96,9 @@ struct CommandCenterView {
     /// Seconds of flash left, and how strong it started.
     flash: f32,
     strength: f32,
+    /// Blown up: a smoking ruin. And whether its material is charred to match.
+    ruined: bool,
+    charred: bool,
 }
 
 fn spawn_command_center(
@@ -88,6 +119,8 @@ fn spawn_command_center(
             material: material.clone(),
             flash: 0.0,
             strength: 0.0,
+            ruined: false,
+            charred: false,
         },
         Mesh3d(meshes.add(command_center_mesh(footprint.size as f32))),
         MeshMaterial3d(material),
@@ -164,15 +197,17 @@ fn command_center_mesh(size: f32) -> Mesh {
 fn take_hits(
     mut commands: Commands,
     mut hits: MessageReader<CommandCenterHit>,
-    mut health: ResMut<CommandCenterHealth>,
-    mut view: Single<(&mut CommandCenterView, &mut Squash)>,
+    mut grid: ResMut<Grid>,
+    mut view: Single<(&mut CommandCenterView, &mut Squash, &Transform)>,
     mut particles: Particles,
     mut shake: ResMut<Shake>,
+    mut hit_stop: ResMut<HitStop>,
+    mut fell: MessageWriter<CommandCenterFell>,
 ) {
     let mut count = 0;
-    let mut fell = false;
+    let mut fallen = false;
     for hit in hits.read() {
-        fell |= health.damage(hit.damage);
+        fallen |= grid.command_center.damage(hit.damage);
         // A few bursts a frame is plenty to read, even when a whole pile arrives at once.
         if count < MAX_GIB_BURSTS {
             particles.burst(
@@ -194,28 +229,122 @@ fn take_hits(
     if count == 0 {
         return;
     }
-    let (view, squash) = &mut *view;
+    let (view, squash, transform) = &mut *view;
     squash.pulse(BASE_HIT_SQUASH);
     shake.add_capped(BASE_HIT_SHAKE, BASE_HIT_SHAKE_MAX);
-    if fell {
-        // Until milestone 5 brings game over, it just shows it and starts over.
-        info!("The Command Center fell. Its HP refills until there's a game over.");
-        health.hp = health.max;
+    if fallen {
+        fell.write(CommandCenterFell);
+        blow_up(&mut commands, &mut particles, transform.translation);
         shake.add(BASE_FALL_SHAKE);
+        hit_stop.slow_motion(BASE_FALL_SLOW_MOTION, BASE_FALL_SLOW_SPEED);
         view.flash = BASE_FALL_FLASH_SECONDS;
         view.strength = 3.0;
+        view.ruined = true;
+        // It slumps into a charred heap.
+        squash.rest = RUIN_SCALE;
+        squash.pulse(-0.6);
     } else if view.flash <= BASE_HIT_FLASH_SECONDS {
         view.flash = BASE_HIT_FLASH_SECONDS;
         view.strength = 1.0;
     }
 }
 
-/// Glows red for a moment after a hit.
+/// The Command Center blowing up: chunks of concrete and steel, a fireball, and dust.
+fn blow_up(commands: &mut Commands, particles: &mut Particles, at: Vec3) {
+    particles.burst(
+        commands,
+        at + Vec3::Y * 0.6,
+        0.8,
+        Burst {
+            colors: &palette::RUBBLE,
+            count: BASE_FALL_DEBRIS,
+            size: RUBBLE_SIZE * 1.6,
+            spread: RUBBLE_SPREAD * 2.5,
+            lift: RUBBLE_LIFT * 2.0,
+            lifetime: RUBBLE_LIFETIME * 2.5,
+        },
+    );
+    particles.spray(
+        commands,
+        at + Vec3::Y * 0.8,
+        Spray {
+            colors: &palette::FLAME,
+            count: BASE_FALL_DEBRIS,
+            size: 0.3,
+            direction: Vec3::Y,
+            cone: 1.2,
+            speed: (2.0, 7.0),
+            gravity: 0.3,
+            grow: 2.0,
+            lifetime: 0.8,
+            glow: true,
+        },
+    );
+    particles.burst(
+        commands,
+        at + Vec3::Y * 0.1,
+        1.0,
+        Burst {
+            colors: &palette::DUST,
+            count: BASE_FALL_DEBRIS,
+            size: DUST_SIZE * 1.5,
+            spread: DUST_SPREAD * 2.0,
+            lift: DUST_LIFT,
+            lifetime: DUST_LIFETIME * 2.0,
+        },
+    );
+}
+
+/// A repair pops the building and throws off sparks.
+fn show_repairs(
+    mut commands: Commands,
+    mut repairs: MessageReader<CommandCenterRepaired>,
+    mut view: Single<(&mut Squash, &Transform), With<CommandCenterView>>,
+    mut particles: Particles,
+) {
+    let mut repaired = false;
+    for repair in repairs.read() {
+        repaired |= repair.to > repair.from;
+    }
+    if !repaired {
+        return;
+    }
+    let (squash, transform) = &mut *view;
+    squash.pulse(REPAIR_POP);
+    particles.spray(
+        &mut commands,
+        transform.translation + Vec3::Y * HEIGHT * 0.7,
+        Spray {
+            colors: &palette::SPARKS,
+            count: 16,
+            size: 0.07,
+            direction: Vec3::Y,
+            cone: 1.1,
+            speed: (1.5, 3.5),
+            gravity: 0.6,
+            grow: 1.0,
+            lifetime: 0.45,
+            glow: true,
+        },
+    );
+}
+
+/// Glows red for a moment after a hit, and looks charred while it's a ruin.
 fn flash(
     time: Res<Time>,
     mut view: Single<&mut CommandCenterView>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    if view.charred != view.ruined
+        && let Some(mut material) = materials.get_mut(&view.material)
+    {
+        material.base_color = if view.ruined {
+            shade(Color::WHITE, RUIN_SHADE)
+        } else {
+            Color::WHITE
+        };
+        view.charred = view.ruined;
+    }
     if view.flash <= 0.0 {
         return;
     }
@@ -231,16 +360,91 @@ fn flash(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn damage_runs_out_once() {
-        let mut health = CommandCenterHealth { hp: 3, max: 3 };
-        assert!(!health.damage(2));
-        assert!(health.damage(2), "the hit that takes the last HP");
-        assert_eq!(health.hp, 0);
-        assert!(!health.damage(1), "already out");
+/// A ruin smokes.
+fn smoke(
+    mut commands: Commands,
+    time: Res<Time>,
+    view: Single<(&CommandCenterView, &Transform)>,
+    mut particles: Particles,
+    mut since: Local<f32>,
+) {
+    let (view, transform) = *view;
+    if !view.ruined {
+        return;
     }
+    *since += time.delta_secs();
+    if *since < RUIN_SMOKE_INTERVAL {
+        return;
+    }
+    *since = 0.0;
+    particles.spray(
+        &mut commands,
+        transform.translation + Vec3::Y * 0.4,
+        Spray {
+            colors: &palette::SMOKE,
+            count: 3,
+            size: 0.3,
+            direction: Vec3::Y,
+            cone: 0.5,
+            speed: (0.5, 1.2),
+            gravity: -0.05,
+            grow: 3.0,
+            lifetime: 1.6,
+            glow: false,
+        },
+    );
+}
+
+/// A new run: a fresh Command Center drops in where the ruin was.
+fn drop_in_a_new_one(
+    mut commands: Commands,
+    landmarks: Res<Landmarks>,
+    mut view: Single<(Entity, &mut CommandCenterView, &mut Squash)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let (entity, view, squash) = &mut *view;
+    view.ruined = false;
+    view.flash = 0.0;
+    squash.rest = Vec3::ONE;
+    if let Some(mut material) = materials.get_mut(&view.material) {
+        material.emissive = LinearRgba::BLACK;
+    }
+    let at = landmarks.command_center.center();
+    commands.entity(*entity).insert(Tween::new(
+        TweenTarget::Translation {
+            from: at + Vec3::Y * DROP_HEIGHT,
+            to: at,
+        },
+        EaseFunction::QuadraticIn,
+        0.0,
+        DROP_SECONDS,
+    ));
+}
+
+/// It lands: a heavy slam, a ring of dust and a big bump.
+fn land(
+    done: On<TweenDone>,
+    mut commands: Commands,
+    mut views: Query<(&Transform, &mut Squash), With<CommandCenterView>>,
+    mut particles: Particles,
+    mut shake: ResMut<Shake>,
+) {
+    let Ok((transform, mut squash)) = views.get_mut(done.entity) else {
+        return;
+    };
+    squash.pulse(LAND_SQUASH);
+    shake.add(TOWER_LAND_SHAKE * 1.5);
+    particles.burst(
+        &mut commands,
+        transform.translation + Vec3::Y * 0.05,
+        1.0,
+        Burst {
+            colors: &palette::DUST,
+            count: TOWER_DUST_COUNT * 2,
+            size: DUST_SIZE * 1.3,
+            spread: DUST_SPREAD * 1.5,
+            lift: DUST_LIFT,
+            lifetime: DUST_LIFETIME,
+        },
+    );
 }

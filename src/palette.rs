@@ -119,3 +119,11 @@ pub const PANEL: Color = Color::srgba(0.05, 0.06, 0.08, 0.8);
 pub const PANEL_HOVER: Color = Color::srgba(0.12, 0.14, 0.18, 0.9);
 pub const PANEL_BORDER: Color = Color::srgba(1.0, 1.0, 1.0, 0.12);
 pub const PANEL_CHOSEN: Color = Color::srgb(0.45, 0.95, 1.0);
+/// The wave loop on screen: a heavy wave's title, the Start button (and speed button) with its
+/// hover, the "wave cleared" banner, and the game-over screen over a darkened map.
+pub const HEAVY_WAVE: Color = Color::srgb(1.0, 0.62, 0.2);
+pub const START_BUTTON: Color = Color::srgba(0.1, 0.3, 0.34, 0.9);
+pub const START_BUTTON_HOVER: Color = Color::srgba(0.16, 0.42, 0.48, 0.95);
+pub const BANNER_TEXT: Color = Color::srgb(0.9, 0.95, 1.0);
+pub const GAME_OVER_TITLE: Color = Color::srgb(1.0, 0.35, 0.2);
+pub const GAME_OVER_BACKDROP: Color = Color::srgba(0.02, 0.02, 0.03, 0.6);

@@ -1,5 +1,6 @@
 //! Small in-house animation helpers: tweens with easing, squash & stretch springs, wobbles,
-//! particles, screen shake and hit-stop.
+//! particles, screen shake, and hit-stop and slow motion (with the game speed, in
+//! [`TimeScale`]).
 
 use crate::rng::{Rng, RunSeed};
 use crate::tuning::juice::*;
@@ -13,6 +14,7 @@ impl Plugin for JuicePlugin {
         app.init_resource::<ParticleAssets>()
             .init_resource::<Shake>()
             .init_resource::<HitStop>()
+            .init_resource::<TimeScale>()
             .add_systems(Startup, seed_particles)
             .add_systems(
                 Update,
@@ -24,7 +26,7 @@ impl Plugin for JuicePlugin {
                     decay_shake,
                 ),
             )
-            .add_systems(Last, run_hit_stop);
+            .add_systems(Last, run_time_scale);
     }
 }
 
@@ -457,14 +459,33 @@ fn decay_shake(time: Res<Time>, mut shake: ResMut<Shake>) {
     }
 }
 
-/// Hit-stop: the game all but freezes for a moment on a big hit, so it lands with weight. Counted
-/// in real time, since game time is what it stops.
+/// How fast game time runs, before hit-stop and slow motion: the dev speed-up
+/// (`DIORAMA_SPEED`, see [`crate::dev`]) times the speed picked for the wave (see
+/// [`crate::waves::GameSpeed`]).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct TimeScale {
+    pub dev: f32,
+    pub play: f32,
+}
+
+impl Default for TimeScale {
+    fn default() -> Self {
+        Self {
+            dev: 1.0,
+            play: 1.0,
+        }
+    }
+}
+
+/// Hit-stop: the game all but freezes for a moment on a big hit, so it lands with weight. And
+/// slow motion, for bigger moments. Counted in real time, since game time is what they slow.
 #[derive(Resource, Default, Debug)]
 pub struct HitStop {
-    /// Real seconds left.
+    /// Real seconds of hit-stop left.
     left: f32,
-    /// The game speed to go back to (the dev speed-up may have changed it).
-    speed: Option<f32>,
+    /// Real seconds of slow motion left, and how fast the game runs meanwhile.
+    slow: f32,
+    slow_speed: f32,
 }
 
 impl HitStop {
@@ -472,14 +493,32 @@ impl HitStop {
     pub fn add(&mut self, seconds: f32) {
         self.left = (self.left + seconds).min(MAX_HIT_STOP);
     }
+
+    /// Slows the game to `speed` for `seconds` (real time), after any hit-stop.
+    pub fn slow_motion(&mut self, seconds: f32, speed: f32) {
+        self.slow = seconds;
+        self.slow_speed = speed;
+    }
 }
 
-fn run_hit_stop(real: Res<Time<Real>>, mut stop: ResMut<HitStop>, mut time: ResMut<Time<Virtual>>) {
-    if stop.left > 0.0 {
-        let speed = *stop.speed.get_or_insert(time.relative_speed());
-        time.set_relative_speed(speed * HIT_STOP_SPEED);
-        stop.left -= real.delta_secs();
-    } else if let Some(speed) = stop.speed.take() {
+fn run_time_scale(
+    real: Res<Time<Real>>,
+    scale: Res<TimeScale>,
+    mut stop: ResMut<HitStop>,
+    mut time: ResMut<Time<Virtual>>,
+) {
+    let dt = real.delta_secs();
+    let slowed = if stop.left > 0.0 {
+        stop.left -= dt;
+        HIT_STOP_SPEED
+    } else if stop.slow > 0.0 {
+        stop.slow -= dt;
+        stop.slow_speed
+    } else {
+        1.0
+    };
+    let speed = scale.dev * scale.play * slowed;
+    if time.relative_speed() != speed {
         time.set_relative_speed(speed);
     }
 }
