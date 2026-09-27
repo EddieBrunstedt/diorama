@@ -1,5 +1,6 @@
-//! Developer helpers that are off unless asked for.
+//! Developer helpers that are off unless asked for (except the FPS counter).
 //!
+//! - A frame time readout sits in the top-right corner (see [`fps`]).
 //! - `DIORAMA_SCREENSHOT=shot.png cargo run` saves a screenshot after a few seconds and quits,
 //!   for checking visuals without clicking around. `DIORAMA_SCREENSHOT_AT` sets the time in
 //!   seconds; a comma-separated list takes several (`shot-1.png`, `shot-2.png`, ...).
@@ -8,6 +9,8 @@
 //!   (seconds): `move X Y` (logical pixels), `down`/`up` (left button), `shift`/`unshift`.
 //! - `DIORAMA_SPEED=4` runs the game four times as fast, e.g. to get to later waves quickly.
 //!   Screenshot and script times are in game time, so they speed up too.
+
+mod fps;
 
 use crate::island::TreeId;
 use crate::keeper::{OrderKind, OrderQueue};
@@ -27,6 +30,7 @@ pub struct DevPlugin;
 
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(fps::FpsPlugin);
         if let Ok(path) = std::env::var("DIORAMA_SCREENSHOT") {
             let times: Vec<f32> = std::env::var("DIORAMA_SCREENSHOT_AT")
                 .ok()

@@ -29,6 +29,8 @@ fn main() {
             primary_window: Some(Window {
                 title: "Island Keeper".into(),
                 resolution: (1600, 900).into(),
+                // Vsync off during development, so the FPS counter shows true performance.
+                present_mode: bevy::window::PresentMode::AutoNoVsync,
                 ..default()
             }),
             ..default()
