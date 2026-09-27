@@ -185,9 +185,8 @@ fn update_readout(
         for frames in &stats.history {
             recent.merge(frames);
         }
-        let row = |label: &str, secs: f32| {
-            format!("{label:<6}{:>5.0}{:>8.2}", 1.0 / secs, secs * 1000.0)
-        };
+        let row =
+            |label: &str, secs: f32| format!("{label:<6}{:>5.0}{:>8.2}", 1.0 / secs, secs * 1000.0);
         text.0 = [
             format!("{:<6}{:>5}{:>8}", "", "fps", "ms"),
             row("avg", stats.text.average()),
