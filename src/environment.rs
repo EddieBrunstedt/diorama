@@ -39,7 +39,8 @@ fn spawn_sun(mut commands: Commands) {
             num_cascades: 2,
             minimum_distance: 1.0,
             first_cascade_far_bound: 40.0,
-            maximum_distance: 140.0,
+            // Far enough to cover a grown map with the camera zoomed all the way out.
+            maximum_distance: 450.0,
             ..default()
         }
         .build(),

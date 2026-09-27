@@ -257,7 +257,7 @@ pub mod camera {
     pub const FRAMING_MARGIN: f32 = 1.12;
     /// Closest and farthest zoom, as the distance from the camera to the ground point it looks at.
     pub const MIN_DISTANCE: f32 = 10.0;
-    pub const MAX_DISTANCE: f32 = 200.0;
+    pub const MAX_DISTANCE: f32 = 320.0;
     /// How much one scroll notch zooms, as a fraction of the distance.
     pub const ZOOM_STEP: f32 = 0.14;
     /// How quickly the camera eases to a new zoom (per second, exponential).

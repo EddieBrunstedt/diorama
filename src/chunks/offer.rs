@@ -131,6 +131,19 @@ impl Offer {
     }
 }
 
+/// Grows the map by `count` chunks, each picked at random from an offer as if after waves 1, 2,
+/// ... (for the dev helper `DIORAMA_CHUNKS`, see [`crate::dev`]).
+pub fn claim_at_random(grid: &mut Grid, landmarks: &Landmarks, count: u32, rng: &mut Rng) {
+    for wave in 1..=count {
+        let offer = Offer::new(grid, landmarks, wave, 0, rng);
+        if offer.choices.is_empty() {
+            return;
+        }
+        let pick = offer.choices[rng.index(offer.choices.len())];
+        pick.add_to(grid);
+    }
+}
+
 /// A random template (with a nest or without) laid down at `slot`, facing the map, that `fits`.
 /// Tries every template and way of laying it down before giving up.
 fn pick(slot: &Slot, nest: bool, rng: &mut Rng, fits: impl Fn(Claim) -> bool) -> Option<Claim> {
@@ -279,6 +292,17 @@ mod tests {
         let fits = |claim| nest_reaches(&grid, &landmarks, claim);
         assert_eq!(pick(&north, true, &mut rng, fits), None);
         assert!(pick(&north, false, &mut rng, |_| true).is_some());
+    }
+
+    #[test]
+    fn growing_the_map_at_random() {
+        let (mut grid, landmarks) = starting_map();
+        claim_at_random(&mut grid, &landmarks, 12, &mut Rng::new(5));
+        assert_eq!(grid.chunks().count(), 4 + 12);
+        let fields = crate::flow::FlowFields::new(&grid, &landmarks);
+        for nest in &grid.nests {
+            assert!(fields.swarmer.distance(nest.min).is_finite());
+        }
     }
 
     #[test]

@@ -25,6 +25,8 @@
 //! - `DIORAMA_MONEY=5000` starts runs with that much money.
 //! - `DIORAMA_BASE_HP=1000000` gives the Command Center that much HP, e.g. so a big wave plays
 //!   out in full for measuring.
+//! - `DIORAMA_CHUNKS=20` grows the starting map by that many chunks, each picked at random from
+//!   an offer, e.g. for looking at a big map (a restart goes back to the plain starting map).
 //! - `DIORAMA_SEED=7` fixes the random seed (see [`RunSeed`]), so scripted runs repeat.
 //! - `DIORAMA_FRAME_LOG=1` logs frame times, the size of the horde, and how long the horde's and
 //!   the towers' steps take, once a second (see [`frame_log`]).
@@ -35,10 +37,14 @@ mod frame_log;
 mod gpu;
 
 use crate::camera::{CameraRig, MainCamera};
+use crate::chunks::offer::claim_at_random;
 use crate::command_center::BaseHp;
 use crate::economy::StartingMoney;
+use crate::grid::Grid;
 use crate::grid::cell_center;
 use crate::juice::TimeScale;
+use crate::map::Landmarks;
+use crate::rng::Rng;
 use crate::rng::RunSeed;
 use crate::waves::WaveSettings;
 use bevy::{
@@ -109,6 +115,13 @@ impl Plugin for DevPlugin {
         }
         if let Some(seed) = env_number::<u64>("DIORAMA_SEED") {
             app.insert_resource(RunSeed(seed));
+        }
+        if let Some(count) = env_number::<u32>("DIORAMA_CHUNKS") {
+            let world = app.world_mut();
+            let mut rng = Rng::new(world.resource::<RunSeed>().0 ^ 0xD1CE);
+            let landmarks = world.resource::<Landmarks>().clone();
+            let mut grid = world.resource_mut::<Grid>();
+            claim_at_random(&mut grid, &landmarks, count, &mut rng);
         }
         if let Ok(script) = std::env::var("DIORAMA_SCRIPT") {
             let steps =
