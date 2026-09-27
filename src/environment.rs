@@ -1,47 +1,66 @@
-//! Sky, sunlight and clouds: the warm late-afternoon mood around the island.
+//! Sky, sunlight, clouds and haze around the island, lit in the current mood (see
+//! [`crate::mood`]).
 
+use crate::camera::{DioramaCamera, Techniques};
+use crate::mood::{CurrentMood, Mood, MoodSystems};
 use crate::palette;
 use crate::rng::Rng;
 use crate::voxel::{VoxelMesh, vary};
 use bevy::{
-    light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster},
+    light::{
+        CascadeShadowConfigBuilder, DirectionalLightShadowMap, FogVolume, NotShadowCaster,
+        VolumetricLight,
+    },
     prelude::*,
 };
 
-const SUN_ILLUMINANCE: f32 = 10_000.0;
-const SKY_BRIGHTNESS: f32 = 480.0;
 /// Clouds drifting underneath the island.
 const LOW_CLOUDS: usize = 9;
 /// Clouds far out near the horizon, behind the island.
 const FAR_CLOUDS: usize = 7;
+/// Distance of the sky backdrop from the camera.
+const BACKDROP_DISTANCE: f32 = 200.0;
 
 pub struct EnvironmentPlugin;
 
 impl Plugin for EnvironmentPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ClearColor(palette::SKY_HORIZON))
+        let calm = Mood::CALM;
+        app.insert_resource(ClearColor(calm.sky_horizon))
             .insert_resource(GlobalAmbientLight {
-                color: palette::SKYLIGHT,
-                brightness: SKY_BRIGHTNESS,
+                color: calm.skylight,
+                brightness: calm.skylight_brightness,
                 ..default()
             })
             .insert_resource(DirectionalLightShadowMap { size: 4096 })
             .init_resource::<CloudMaterial>()
-            .add_systems(Startup, (spawn_sun, spawn_clouds))
-            .add_systems(Update, drift_clouds);
+            .add_systems(Startup, (spawn_sun, spawn_clouds, spawn_haze))
+            .add_systems(
+                Update,
+                (
+                    spawn_sky,
+                    drift_clouds,
+                    (light_sky, color_sky).after(MoodSystems),
+                ),
+            );
     }
 }
 
-fn spawn_sun(mut commands: Commands) {
-    commands.spawn((
+#[derive(Component)]
+struct Sun;
+
+fn spawn_sun(mut commands: Commands, techniques: Res<Techniques>) {
+    let calm = Mood::CALM;
+    let mut sun = commands.spawn((
+        Sun,
         DirectionalLight {
-            color: palette::SUNLIGHT,
-            illuminance: SUN_ILLUMINANCE,
+            color: calm.sun,
+            illuminance: calm.sun_illuminance,
             shadow_maps_enabled: true,
+            contact_shadows_enabled: techniques.contact_shadows,
             ..default()
         },
-        // Low from the south-west: long shadows, lit faces toward the camera, shaded east faces.
-        Transform::from_xyz(-5.0, 6.5, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::default().looking_to(calm.sun_direction(), Vec3::Y),
         // The island is small, so one tight cascade gives the crispest shadows.
         CascadeShadowConfigBuilder {
             num_cascades: 1,
@@ -51,6 +70,125 @@ fn spawn_sun(mut commands: Commands) {
         }
         .build(),
     ));
+    if techniques.volumetric {
+        sun.insert(VolumetricLight);
+    }
+}
+
+/// The haze the light shafts shine through.
+#[derive(Component)]
+struct Haze;
+
+/// A layer of haze around the island that the sun and the hearth shine through in shafts.
+fn spawn_haze(mut commands: Commands, techniques: Res<Techniques>) {
+    if !techniques.volumetric {
+        return;
+    }
+    commands.spawn((
+        Haze,
+        FogVolume {
+            density_factor: Mood::CALM.haze,
+            ..default()
+        },
+        Transform::from_xyz(0.0, -3.0, 0.0).with_scale(Vec3::new(18.0, 9.0, 18.0)),
+    ));
+}
+
+/// The sun, the skylight, the haze and the clouds' glow follow the mood.
+fn light_sky(
+    current: Res<CurrentMood>,
+    mut sun: Single<(&mut DirectionalLight, &mut Transform), With<Sun>>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut clear: ResMut<ClearColor>,
+    mut haze: Query<&mut FogVolume, With<Haze>>,
+    clouds: Res<CloudMaterial>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !current.is_changed() {
+        return;
+    }
+    let mood = &current.mood;
+    let (light, transform) = &mut *sun;
+    light.color = mood.sun;
+    light.illuminance = mood.sun_illuminance;
+    **transform = Transform::default().looking_to(mood.sun_direction(), Vec3::Y);
+    ambient.color = mood.skylight;
+    ambient.brightness = mood.skylight_brightness;
+    clear.0 = mood.sky_horizon;
+    for mut volume in &mut haze {
+        volume.density_factor = mood.haze;
+    }
+    if let Some(mut material) = materials.get_mut(&clouds.0) {
+        material.emissive = mood.cloud_glow.to_linear();
+    }
+}
+
+/// The gradient sky behind everything, fixed to the camera.
+#[derive(Component)]
+struct Sky(Handle<Mesh>);
+
+fn spawn_sky(
+    mut commands: Commands,
+    cameras: Query<(Entity, &Projection), Added<DioramaCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (camera, projection) in &cameras {
+        let Projection::Perspective(perspective) = projection else {
+            continue;
+        };
+        let height = 2.0 * BACKDROP_DISTANCE * (perspective.fov / 2.0).tan() * 1.2;
+        let calm = Mood::CALM;
+        let mesh = meshes.add(sky_gradient(
+            Vec2::new(height * 3.0, height),
+            calm.sky_top,
+            calm.sky_horizon,
+        ));
+        commands.spawn((
+            Sky(mesh.clone()),
+            Mesh3d(mesh),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                fog_enabled: false,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, 0.0, -BACKDROP_DISTANCE),
+            NotShadowCaster,
+            ChildOf(camera),
+        ));
+    }
+}
+
+fn color_sky(current: Res<CurrentMood>, skies: Query<&Sky>, mut meshes: ResMut<Assets<Mesh>>) {
+    if !current.is_changed() {
+        return;
+    }
+    for sky in &skies {
+        if let Some(mut mesh) = meshes.get_mut(&sky.0) {
+            paint_gradient(&mut mesh, current.mood.sky_top, current.mood.sky_horizon);
+        }
+    }
+}
+
+/// A quad with a vertical color gradient from the horizon color up to the sky color.
+fn sky_gradient(size: Vec2, top: Color, horizon: Color) -> Mesh {
+    let mut mesh = Mesh::from(Rectangle::from_size(size));
+    paint_gradient(&mut mesh, top, horizon);
+    mesh
+}
+
+fn paint_gradient(mesh: &mut Mesh, top: Color, horizon: Color) {
+    let top = top.to_linear().to_f32_array();
+    let bottom = horizon.to_linear().to_f32_array();
+    let colors: Vec<[f32; 4]> = mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .and_then(|positions| positions.as_float3())
+        .expect("rectangle mesh has positions")
+        .iter()
+        .map(|p| if p[1] > 0.0 { top } else { bottom })
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
 }
 
 /// A voxel cloud slowly circling the island below its rim.
@@ -71,7 +209,7 @@ impl FromWorld for CloudMaterial {
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         Self(materials.add(StandardMaterial {
             base_color: Color::WHITE,
-            emissive: LinearRgba::rgb(0.35, 0.33, 0.36),
+            emissive: Mood::CALM.cloud_glow.to_linear(),
             perceptual_roughness: 1.0,
             reflectance: 0.0,
             ..default()

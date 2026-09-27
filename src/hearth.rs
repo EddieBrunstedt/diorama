@@ -3,15 +3,17 @@
 //! Slimes that reach it hurt it ([`HearthHealth`]). The fire burns lower as it's hurt, and goes
 //! out when the hit points are gone: game over.
 
+use crate::camera::Techniques;
 use crate::island::{Tile, TileKind};
 use crate::juice::{Burst, Particles, Shake, Tween, Wobble};
+use crate::mood::{CurrentMood, MoodSystems};
 use crate::palette;
 use crate::phase::GameState;
 use crate::rng::Rng;
 use crate::tuning::HEARTH_HP;
 use crate::ui::Popup;
 use crate::voxel::{VOXEL, VoxelMaterial, VoxelMesh, shade, vary};
-use bevy::light::NotShadowCaster;
+use bevy::light::{NotShadowCaster, VolumetricLight};
 use bevy::prelude::*;
 
 /// How long after its tile lands the hearth pops up.
@@ -49,7 +51,7 @@ impl Plugin for HearthPlugin {
                 (
                     spawn_hearth,
                     react_to_hits,
-                    flicker,
+                    flicker.after(MoodSystems),
                     flash_hearth,
                     spawn_embers,
                     rise_embers,
@@ -188,6 +190,7 @@ impl FromWorld for FireAssets {
 
 fn spawn_hearth(
     mut commands: Commands,
+    techniques: Res<Techniques>,
     tiles: Query<(Entity, &Tile, Option<&Tween>), Added<Tile>>,
     fire: Res<FireAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -249,7 +252,7 @@ fn spawn_hearth(
             ));
         }
 
-        commands.spawn((
+        let mut light = commands.spawn((
             Firelight,
             PointLight {
                 color: palette::FIRELIGHT,
@@ -262,6 +265,10 @@ fn spawn_hearth(
             Transform::from_xyz(0.0, (PLATFORM_TOP + 8.0) * VOXEL, 0.0),
             ChildOf(hearth),
         ));
+        if techniques.volumetric {
+            // The fire glows through the haze.
+            light.insert(VolumetricLight);
+        }
     }
 }
 
@@ -344,7 +351,7 @@ fn hearth_mesh() -> VoxelMesh {
 }
 
 /// Cheap smooth noise in roughly [-1, 1]: a few out-of-phase sines.
-fn wobble(t: f32, phase: f32) -> f32 {
+pub fn wobble(t: f32, phase: f32) -> f32 {
     ((t * 7.3 + phase).sin() * 0.5
         + (t * 13.1 + phase * 2.3).sin() * 0.3
         + (t * 23.7 + phase).sin() * 0.2)
@@ -413,6 +420,7 @@ fn react_to_hits(
 fn flicker(
     time: Res<Time>,
     health: Res<HearthHealth>,
+    mood: Res<CurrentMood>,
     mut fire: ResMut<Fire>,
     mut flames: Query<(&Flame, &mut Transform)>,
     mut lights: Query<&mut PointLight, With<Firelight>>,
@@ -448,7 +456,8 @@ fn flicker(
             + sway * 0.12 * VOXEL;
     }
     for mut light in &mut lights {
-        light.intensity = FIRELIGHT_INTENSITY * size * (1.0 + 0.12 * wobble(t * 1.3, 0.0));
+        light.intensity =
+            FIRELIGHT_INTENSITY * mood.mood.firelight * size * (1.0 + 0.12 * wobble(t * 1.3, 0.0));
     }
 }
 

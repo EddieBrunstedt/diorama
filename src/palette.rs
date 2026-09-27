@@ -12,6 +12,31 @@ pub const SUNLIGHT: Color = Color::srgb_u8(0xFF, 0xE0, 0xBA);
 pub const SKYLIGHT: Color = Color::srgb_u8(0xA8, 0xBF, 0xE6);
 pub const CLOUD: Color = Color::srgb_u8(0xFF, 0xFA, 0xF4);
 pub const CLOUD_SHADE: Color = Color::srgb_u8(0xDC, 0xD8, 0xEE);
+/// Clouds glow a little so they stay white instead of taking on the fog's color.
+pub const CLOUD_GLOW: Color = Color::srgb_u8(0x9E, 0x9A, 0xA0);
+
+// Lighting moods (see `mood.rs`). The calm mood uses the sky and light colors above.
+// The wave: a stormy dusk. A low red sun under a violet sky, lit up by fire and lanterns.
+pub const DUSK_SUN: Color = Color::srgb_u8(0xFF, 0x8C, 0x5C);
+pub const DUSK_SKY_TOP: Color = Color::srgb_u8(0x2E, 0x2C, 0x5E);
+pub const DUSK_HORIZON: Color = Color::srgb_u8(0xB4, 0x74, 0x8C);
+pub const DUSK_FOG: Color = Color::srgb_u8(0x6C, 0x62, 0x8C);
+pub const DUSK_SKYLIGHT: Color = Color::srgb_u8(0x6C, 0x84, 0xE8);
+pub const DUSK_CLOUD_GLOW: Color = Color::srgb_u8(0x5A, 0x48, 0x68);
+// The tile offer: the wave is over, a golden evening after the storm.
+pub const GOLDEN_SUN: Color = Color::srgb_u8(0xFF, 0xD6, 0xA8);
+pub const GOLDEN_SKY_TOP: Color = Color::srgb_u8(0x6C, 0x8C, 0xD0);
+pub const GOLDEN_HORIZON: Color = Color::srgb_u8(0xFA, 0xCC, 0xA8);
+pub const GOLDEN_FOG: Color = Color::srgb_u8(0xEC, 0xCC, 0xB8);
+pub const GOLDEN_SKYLIGHT: Color = Color::srgb_u8(0x9C, 0xB0, 0xEC);
+pub const GOLDEN_CLOUD_GLOW: Color = Color::srgb_u8(0xB0, 0x98, 0x90);
+// Game over: the hearth is out and the island goes cold and gray.
+pub const LOST_SUN: Color = Color::srgb_u8(0xA8, 0xB4, 0xD8);
+pub const LOST_SKY_TOP: Color = Color::srgb_u8(0x28, 0x2E, 0x44);
+pub const LOST_HORIZON: Color = Color::srgb_u8(0x6C, 0x70, 0x84);
+pub const LOST_FOG: Color = Color::srgb_u8(0x5C, 0x60, 0x70);
+pub const LOST_SKYLIGHT: Color = Color::srgb_u8(0x90, 0x9C, 0xC0);
+pub const LOST_CLOUD_GLOW: Color = Color::srgb_u8(0x40, 0x44, 0x50);
 
 // Ground.
 pub const MEADOW_GRASS: Color = Color::srgb_u8(0x93, 0xC4, 0x5A);
@@ -49,6 +74,13 @@ pub const FLAME_OUTER: Color = Color::srgb(1.0, 0.3, 0.03);
 pub const FLAME_CORE: Color = Color::srgb(1.0, 0.6, 0.08);
 pub const FIRELIGHT: Color = Color::srgb(1.0, 0.62, 0.3);
 
+// Lamps that come on at dusk: tower lanterns, arrow tips, burning boulders.
+pub const LANTERN_GLASS: Color = Color::srgb_u8(0xFF, 0xE8, 0xB0);
+pub const LAMP_GLOW: Color = Color::srgb(1.0, 0.55, 0.18);
+pub const LAMPLIGHT: Color = Color::srgb(1.0, 0.7, 0.4);
+/// The light of a boulder landing.
+pub const IMPACT_FLASH: Color = Color::srgb(1.0, 0.8, 0.55);
+
 // The keeper: a little gnome in a red hat and a blue tunic.
 pub const KEEPER_HAT: Color = Color::srgb_u8(0xD2, 0x46, 0x3C);
 pub const KEEPER_TUNIC: Color = Color::srgb_u8(0x4A, 0x7C, 0xC0);
@@ -78,6 +110,8 @@ pub const SLIME: Color = Color::srgb_u8(0xA0, 0x84, 0xE8);
 pub const WAVE_HOLD: Color = Color::srgb_u8(0x84, 0x64, 0xD4);
 /// Goo slimes spit at towers: a little greener and glossier than the slimes themselves.
 pub const GOO: Color = Color::srgb_u8(0xB4, 0x9C, 0xF0);
+/// Slimes and their goo glow faintly in the dark.
+pub const SLIME_GLOW: Color = Color::srgb_u8(0x9C, 0x7C, 0xFF);
 
 // The prepare phase and the bell.
 pub const BRASS: Color = Color::srgb_u8(0xE6, 0xA8, 0x3E);

@@ -13,6 +13,8 @@ mod hearth;
 mod island;
 mod juice;
 mod keeper;
+mod lamps;
+mod mood;
 mod offer;
 mod palette;
 mod phase;
@@ -40,6 +42,8 @@ fn main() {
         .add_plugins((
             environment::EnvironmentPlugin,
             camera::CameraPlugin,
+            mood::MoodPlugin,
+            lamps::LampsPlugin,
             island::IslandPlugin,
             hearth::HearthPlugin,
             towers::TowersPlugin,

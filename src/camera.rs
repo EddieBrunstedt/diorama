@@ -2,17 +2,22 @@
 
 use crate::island::{Island, cell_to_world};
 use crate::juice::Shake;
-use crate::palette;
+use crate::mood::{CurrentMood, Mood, MoodSystems};
 use crate::voxel::TILE_SIZE;
 use bevy::{
+    anti_alias::{smaa::Smaa, taa::TemporalAntiAliasing},
     core_pipeline::tonemapping::Tonemapping,
-    light::NotShadowCaster,
-    post_process::bloom::Bloom,
+    light::VolumetricFog,
+    pbr::{ContactShadows, ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel},
+    post_process::{bloom::Bloom, effect_stack::Vignette},
     prelude::*,
     render::view::{ColorGrading, ColorGradingGlobal},
     window::PrimaryWindow,
 };
 
+/// Size of the vignette's clear middle, and how softly it falls off toward the corners.
+const VIGNETTE_RADIUS: f32 = 0.8;
+const VIGNETTE_SMOOTHNESS: f32 = 2.0;
 /// Narrow field of view: less perspective distortion, more "miniature on a table".
 const FOV_DEGREES: f32 = 28.0;
 /// How far the camera looks down.
@@ -27,8 +32,6 @@ const FRAMING: f32 = 6.6;
 const MIN_ASPECT: f32 = 1.2;
 /// Where the camera looks: a bit below the surface, so the floating rock is framed too.
 const LOOK_AT: Vec3 = Vec3::new(0.0, -0.45, 0.0);
-/// Distance of the sky backdrop from the camera.
-const BACKDROP_DISTANCE: f32 = 200.0;
 /// How quickly the camera eases to a new framing (per second, exponential), e.g. when the island
 /// grows or UI covers part of the screen.
 const REFRAME_RATE: f32 = 4.0;
@@ -43,8 +46,9 @@ pub struct CameraPlugin;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CoveredRight>()
+            .init_resource::<Techniques>()
             .add_systems(Startup, spawn_camera)
-            .add_systems(Update, frame_island);
+            .add_systems(Update, (frame_island, grade_view.after(MoodSystems)));
     }
 }
 
@@ -52,17 +56,38 @@ impl Plugin for CameraPlugin {
 #[derive(Component)]
 pub struct DioramaCamera;
 
+/// Which rendering techniques are on. `DIORAMA_LIGHTING` turns single ones off (or on) to compare looks and measure what each costs (see `dev.rs`).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct Techniques {
+    /// Screen-space ambient occlusion: soft shade in the creases between voxels.
+    pub ssao: bool,
+    /// Temporal anti-aliasing instead of SMAA. Smooths SSAO noise, but smears small fast things.
+    pub taa: bool,
+    /// Screen-space contact shadows from the sun, for small details the shadow map misses.
+    pub contact_shadows: bool,
+    /// Volumetric fog around the island, with light shafts from the sun and the hearth. Off: it
+    /// cost about 1 ms of GPU time and only made the island hazier and muddier.
+    pub volumetric: bool,
+}
+
+impl Default for Techniques {
+    fn default() -> Self {
+        Self {
+            ssao: true,
+            taa: false,
+            contact_shadows: true,
+            volumetric: false,
+        }
+    }
+}
+
 /// How much of the screen's right side UI is covering (logical pixels), e.g. the tile offer.
 /// The camera slides the island to the left to keep it clear, if there's room.
 #[derive(Resource, Default)]
 pub struct CoveredRight(pub f32);
 
-fn spawn_camera(
-    mut commands: Commands,
-    island: Res<Island>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn spawn_camera(mut commands: Commands, island: Res<Island>, techniques: Res<Techniques>) {
+    let calm = Mood::CALM;
     let fov = FOV_DEGREES.to_radians();
     let distance = camera_distance(&island, 16.0 / 9.0);
     let camera = commands
@@ -72,39 +97,82 @@ fn spawn_camera(
             Projection::Perspective(PerspectiveProjection { fov, ..default() }),
             camera_transform(distance),
             Tonemapping::TonyMcMapface,
-            ColorGrading {
-                global: ColorGradingGlobal {
-                    post_saturation: 1.12,
-                    ..default()
-                },
-                ..default()
-            },
+            ColorGrading::default(),
             Bloom {
-                intensity: 0.18,
+                intensity: calm.bloom,
                 ..Bloom::NATURAL
             },
+            Vignette {
+                intensity: calm.vignette,
+                radius: VIGNETTE_RADIUS,
+                smoothness: VIGNETTE_SMOOTHNESS,
+                ..default()
+            },
             DistanceFog {
-                color: palette::FOG,
+                color: calm.fog,
                 falloff: fog_falloff(distance),
                 ..default()
             },
+            // SSAO needs MSAA off; SMAA (or TAA) smooths the edges instead.
+            Msaa::Off,
         ))
         .id();
-
-    // A gradient sky behind everything, fixed to the camera.
-    let height = 2.0 * BACKDROP_DISTANCE * (fov / 2.0).tan() * 1.2;
-    commands.spawn((
-        Mesh3d(meshes.add(sky_gradient(Vec2::new(height * 3.0, height)))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            fog_enabled: false,
+    if techniques.taa {
+        commands
+            .entity(camera)
+            .insert(TemporalAntiAliasing::default());
+    } else {
+        commands.entity(camera).insert(Smaa::default());
+    }
+    if techniques.contact_shadows {
+        commands.entity(camera).insert(ContactShadows {
+            length: 0.15,
+            thickness: 0.05,
             ..default()
-        })),
-        Transform::from_xyz(0.0, 0.0, -BACKDROP_DISTANCE),
-        NotShadowCaster,
-        ChildOf(camera),
-    ));
+        });
+    }
+    if techniques.volumetric {
+        commands.entity(camera).insert(VolumetricFog {
+            ambient_intensity: 0.0,
+            ..default()
+        });
+    }
+    if techniques.ssao {
+        commands.entity(camera).insert(ScreenSpaceAmbientOcclusion {
+            quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
+            ..default()
+        });
+    }
+}
+
+/// The camera's post-processing follows the mood: exposure, white balance, saturation, bloom,
+/// vignette and the color of the distance fog.
+fn grade_view(
+    current: Res<CurrentMood>,
+    mut camera: Single<
+        (
+            &mut ColorGrading,
+            &mut Bloom,
+            &mut Vignette,
+            &mut DistanceFog,
+        ),
+        With<DioramaCamera>,
+    >,
+) {
+    if !current.is_changed() {
+        return;
+    }
+    let mood = &current.mood;
+    let (grading, bloom, vignette, fog) = &mut *camera;
+    grading.global = ColorGradingGlobal {
+        exposure: mood.exposure,
+        temperature: mood.temperature,
+        post_saturation: mood.saturation,
+        ..default()
+    };
+    bloom.intensity = mood.bloom;
+    vignette.intensity = mood.vignette;
+    fog.color = mood.fog;
 }
 
 fn camera_distance(island: &Island, aspect: f32) -> f32 {
@@ -244,20 +312,4 @@ fn screen_bounds(
                 bounds.union_point(point)
             }))
         })
-}
-
-/// A quad with a vertical color gradient from the horizon color up to the sky color.
-fn sky_gradient(size: Vec2) -> Mesh {
-    let mut mesh = Mesh::from(Rectangle::from_size(size));
-    let top = palette::SKY_TOP.to_linear().to_f32_array();
-    let bottom = palette::SKY_HORIZON.to_linear().to_f32_array();
-    let colors: Vec<[f32; 4]> = mesh
-        .attribute(Mesh::ATTRIBUTE_POSITION)
-        .and_then(|positions| positions.as_float3())
-        .expect("rectangle mesh has positions")
-        .iter()
-        .map(|p| if p[1] > 0.0 { top } else { bottom })
-        .collect();
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh
 }

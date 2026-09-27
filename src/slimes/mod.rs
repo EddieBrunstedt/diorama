@@ -16,6 +16,7 @@ pub use wave::{Health, WaveRun, WaveSpec};
 use crate::hearth::{HearthHealth, HearthHit};
 use crate::island::{Island, TileKind, cell_to_world};
 use crate::juice::{Burst, Flight, FlightTarget, Landed, Particles, Squash, Tween};
+use crate::lamps::GlowMaterials;
 use crate::palette;
 use crate::phase::{GameState, Waves};
 use crate::rng::Rng;
@@ -146,7 +147,8 @@ impl FromWorld for SlimeAssets {
         let mesh = world
             .resource_mut::<Assets<Mesh>>()
             .add(model::slime_mesh().build());
-        let normal = world.resource::<VoxelMaterial>().0.clone();
+        // Slimes glow faintly in the dark, so they stay easy to spot during the wave.
+        let normal = world.get_resource_or_init::<GlowMaterials>().slime.clone();
         let flash = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(StandardMaterial {

@@ -15,6 +15,7 @@ use crate::island::Island;
 use crate::island::cell_to_world;
 use crate::juice::{Burst, HitStop, Particles, Shake, Squash, Tween};
 use crate::keeper::{Aim, PlanSystems};
+use crate::lamps::{GlowMaterials, flash, lamp};
 use crate::palette;
 use crate::phase::GameState;
 use crate::slimes::{HitBy, Road, Slime, SlimeHit};
@@ -40,6 +41,14 @@ const ARM_DAMPING: f32 = 13.0;
 const ARM_KICK: f32 = 16.0;
 /// The boulder leaves the bucket this far (radians) before the arm hits the crossbar.
 const LAUNCH_BEFORE_STOP: f32 = 0.3;
+/// A burning boulder's light at full dusk, and how far it reaches.
+const BOULDER_LUMENS: f32 = 12_000.0;
+const BOULDER_LIGHT_RANGE: f32 = 1.8;
+/// The flash where a boulder lands (a full charge's), whatever the mood.
+const IMPACT_LUMENS: f32 = 60_000.0;
+const IMPACT_FLASH_RANGE: f32 = 2.5;
+const IMPACT_FLASH_TIME: f32 = 0.35;
+const IMPACT_FLASH_HEIGHT: f32 = 0.3;
 /// Screen shake and hit-stop (real seconds) for a shot landing: a base, plus more for a full
 /// charge and for every slime popped.
 const IMPACT_SHAKE: f32 = 0.22;
@@ -159,6 +168,8 @@ pub struct CatapultAssets {
     arm: Handle<Mesh>,
     boulder: Handle<Mesh>,
     voxel: Handle<StandardMaterial>,
+    /// Boulders smoulder at dusk.
+    ember: Handle<StandardMaterial>,
 }
 
 impl FromWorld for CatapultAssets {
@@ -168,11 +179,13 @@ impl FromWorld for CatapultAssets {
         let arm = meshes.add(model::arm_mesh().build());
         let boulder = meshes.add(model::boulder_mesh().build());
         let voxel = world.resource::<VoxelMaterial>().0.clone();
+        let ember = world.get_resource_or_init::<GlowMaterials>().ember.clone();
         Self {
             base,
             arm,
             boulder,
             voxel,
+            ember,
         }
     }
 }
@@ -210,7 +223,8 @@ pub fn finish_catapult(
         .id();
     let loaded = commands
         .spawn((
-            mesh(&assets.boulder),
+            Mesh3d(assets.boulder.clone()),
+            MeshMaterial3d(assets.ember.clone()),
             Transform::from_translation(model::BUCKET * VOXEL),
             ChildOf(arm),
         ))
@@ -383,8 +397,10 @@ fn swing_arms(
                     lost,
                 },
                 Mesh3d(assets.boulder.clone()),
-                MeshMaterial3d(assets.voxel.clone()),
+                MeshMaterial3d(assets.ember.clone()),
                 Transform::from_translation(start),
+                // Boulders fly burning at dusk, lighting up the ground beneath them.
+                children![lamp(BOULDER_LUMENS, BOULDER_LIGHT_RANGE, start.x * 9.0)],
             ));
             commands.entity(catapult.loaded).insert(Visibility::Hidden);
             catapult.bucket_full = false;
@@ -484,6 +500,13 @@ fn fly_boulders(
             hit_stop.add(HIT_STOP + HIT_STOP_PER_POP * popped.min(3) as f32);
         }
         let at = boulder.to;
+        let strength = shot.radius / self::shot(1.0).radius;
+        commands.spawn(flash(
+            at + Vec3::Y * IMPACT_FLASH_HEIGHT,
+            IMPACT_LUMENS * strength,
+            IMPACT_FLASH_RANGE,
+            IMPACT_FLASH_TIME,
+        ));
         particles.burst(
             &mut commands,
             at + Vec3::Y * 0.05,
@@ -603,7 +626,7 @@ fn show_reticle(
                     AimDot {
                         ring: k < RING_DOTS,
                     },
-                    particles.cube(palette::ORDER_CATAPULT),
+                    particles.marker(palette::ORDER_CATAPULT),
                     Transform::from_scale(Vec3::splat(DOT_SIZE)),
                     Visibility::Hidden,
                     NotShadowCaster,

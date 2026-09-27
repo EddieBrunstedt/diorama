@@ -4,10 +4,11 @@
 use super::aim::{Candidate, pick_target};
 use super::{Tower, TowerAssets};
 use crate::juice::{Burst, Particles, Squash, Tween, Wobble};
+use crate::lamps::lamp;
 use crate::palette;
 use crate::slimes::{HitBy, MIDDLE_HEIGHT, Slime, SlimeHit};
 use crate::tuning::{ARROW_SPEED, TOWER_COOLDOWN, TOWER_DAMAGE, TOWER_RANGE};
-use crate::voxel::{TILE_SIZE, VoxelMesh};
+use crate::voxel::{TILE_SIZE, VOXEL, VoxelMesh};
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
@@ -21,6 +22,11 @@ const ARC: f32 = 0.18;
 const ARC_PER_TILE: f32 = 0.12;
 /// Shortest flight, so point-blank arrows are still visible.
 const MIN_FLIGHT: f32 = 0.12;
+/// Arrow tips glow at dusk and light the ground they fly over a little.
+const TIP: Vec3 = Vec3::new(0.0, 0.0, -1.7);
+const TIP_SIZE: f32 = 0.6;
+const TIP_LUMENS: f32 = 1_500.0;
+const TIP_RANGE: f32 = 0.7;
 
 /// A tower that shoots. `body` is the child that recoils.
 #[derive(Component, Debug)]
@@ -88,20 +94,35 @@ pub(super) fn shoot(
         let toward = (to - tower.translation()).with_y(0.0).normalize_or(Vec3::X);
         let start = tower.translation() + Vec3::Y * LOOKOUT_HEIGHT + toward * LOOKOUT_REACH;
         let distance = start.distance(to);
-        commands.spawn((
-            Arrow {
-                target,
-                from: start,
-                to,
-                arc: ARC + ARC_PER_TILE * distance,
-                age: 0.0,
-                duration: (distance / (ARROW_SPEED * TILE_SIZE)).max(MIN_FLIGHT),
-            },
-            Mesh3d(assets.arrow.clone()),
-            MeshMaterial3d(assets.voxel.clone()),
-            Transform::from_translation(start).looking_to(to - start, Vec3::Y),
-            NotShadowCaster,
-        ));
+        let phase = time.elapsed_secs() * 3.1;
+        commands
+            .spawn((
+                Arrow {
+                    target,
+                    from: start,
+                    to,
+                    arc: ARC + ARC_PER_TILE * distance,
+                    age: 0.0,
+                    duration: (distance / (ARROW_SPEED * TILE_SIZE)).max(MIN_FLIGHT),
+                },
+                Mesh3d(assets.arrow.clone()),
+                MeshMaterial3d(assets.voxel.clone()),
+                Transform::from_translation(start).looking_to(to - start, Vec3::Y),
+                NotShadowCaster,
+            ))
+            .with_children(|arrow| {
+                arrow.spawn((
+                    Mesh3d(assets.cube.clone()),
+                    MeshMaterial3d(assets.lamp.clone()),
+                    Transform::from_translation(TIP * VOXEL)
+                        .with_scale(Vec3::splat(TIP_SIZE * VOXEL)),
+                    NotShadowCaster,
+                ));
+                arrow.spawn((
+                    lamp(TIP_LUMENS, TIP_RANGE, phase),
+                    Transform::from_translation(TIP * VOXEL),
+                ));
+            });
 
         // Recoil: the tower squashes and rocks back from the shot.
         if let Ok((mut squash, transform, wobble)) = bodies.get_mut(archer.body) {

@@ -2,7 +2,7 @@
 //! particles, things flying to where they're counted, screen shake and hit-stop.
 
 use crate::rng::Rng;
-use crate::voxel::{VoxelMaterial, VoxelMesh};
+use crate::voxel::{MarkerMaterial, VoxelMaterial, VoxelMesh};
 use bevy::{ecs::system::SystemParam, light::NotShadowCaster, prelude::*};
 use std::collections::HashMap;
 
@@ -29,6 +29,7 @@ pub struct JuicePlugin;
 impl Plugin for JuicePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelMaterial>()
+            .init_resource::<MarkerMaterial>()
             .init_resource::<CubeCache>()
             .init_resource::<Shake>()
             .init_resource::<HitStop>()
@@ -269,6 +270,7 @@ pub struct Particles<'w> {
     meshes: ResMut<'w, Assets<Mesh>>,
     cache: ResMut<'w, CubeCache>,
     material: Res<'w, VoxelMaterial>,
+    marker: Res<'w, MarkerMaterial>,
     rng: ResMut<'w, ParticleRng>,
 }
 
@@ -280,10 +282,24 @@ impl Particles<'_> {
 
     /// A unit cube in `color` using the shared voxel material.
     pub fn cube(&mut self, color: Color) -> (Mesh3d, MeshMaterial3d<StandardMaterial>) {
+        (
+            Mesh3d(self.cube_mesh(color)),
+            MeshMaterial3d(self.material.0.clone()),
+        )
+    }
+
+    /// A unit cube in `color` that ignores the lighting, for markers (see [`MarkerMaterial`]).
+    pub fn marker(&mut self, color: Color) -> (Mesh3d, MeshMaterial3d<StandardMaterial>) {
+        (
+            Mesh3d(self.cube_mesh(color)),
+            MeshMaterial3d(self.marker.0.clone()),
+        )
+    }
+
+    fn cube_mesh(&mut self, color: Color) -> Handle<Mesh> {
         let key = color.to_srgba().to_u8_array();
         let meshes = &mut self.meshes;
-        let mesh = self
-            .cache
+        self.cache
             .0
             .entry(key)
             .or_insert_with(|| {
@@ -292,8 +308,7 @@ impl Particles<'_> {
                 mesh.cuboid(Vec3::splat(-5.0), Vec3::splat(5.0), color);
                 meshes.add(mesh.build())
             })
-            .clone();
-        (Mesh3d(mesh), MeshMaterial3d(self.material.0.clone()))
+            .clone()
     }
 
     pub fn burst(&mut self, commands: &mut Commands, at: Vec3, burst: Burst) {

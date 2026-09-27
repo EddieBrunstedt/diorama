@@ -14,12 +14,20 @@
 //!   Screenshot and script times are in game time, so they speed up too.
 //! - `DIORAMA_SEED=7` fixes the random seed for the tile offers, so scripted runs repeat.
 //! - `DIORAMA_WAVE=4` starts the run at wave 4, e.g. to see slimes spit at towers.
+//! - `DIORAMA_MOOD=wave` holds the lighting in one mood (`calm`, `wave`, `offer` or `lost`),
+//!   whatever the phase, to compare moods side by side.
+//! - `DIORAMA_LIGHTING="-ssao,+taa"` turns rendering techniques off (`-`) or on (`+`), to compare
+//!   looks and costs (see [`crate::camera::Techniques`]).
+//! - `DIORAMA_GPU_TIMES=1` logs the GPU time of each render pass every few seconds (see [`gpu`]).
 
 mod fps;
+mod gpu;
 
+use crate::camera::Techniques;
 use crate::catapult::Catapult;
 use crate::island::TreeId;
 use crate::keeper::{Backpack, Building, OrderKind, OrderQueue};
+use crate::mood::{CurrentMood, ForcedMood, MoodKind};
 use crate::phase::Waves;
 use bevy::{
     input::{
@@ -42,6 +50,26 @@ pub struct DevPlugin;
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(fps::FpsPlugin);
+        if let Ok(changes) = std::env::var("DIORAMA_LIGHTING") {
+            let mut techniques = Techniques::default();
+            apply_lighting(&mut techniques, &changes)
+                .unwrap_or_else(|error| panic!("DIORAMA_LIGHTING: {error}"));
+            app.insert_resource(techniques);
+        }
+        if let Ok(name) = std::env::var("DIORAMA_MOOD") {
+            let kind = match name.as_str() {
+                "calm" => MoodKind::Calm,
+                "wave" => MoodKind::Wave,
+                "offer" => MoodKind::Offer,
+                "lost" => MoodKind::Lost,
+                _ => panic!("DIORAMA_MOOD: unknown mood {name:?}"),
+            };
+            app.insert_resource(ForcedMood(Some(kind)))
+                .insert_resource(CurrentMood::new(kind));
+        }
+        if std::env::var_os("DIORAMA_GPU_TIMES").is_some() {
+            app.add_plugins(gpu::GpuTimesPlugin);
+        }
         if let Ok(path) = std::env::var("DIORAMA_SCREENSHOT") {
             let times: Vec<f32> = std::env::var("DIORAMA_SCREENSHOT_AT")
                 .ok()
@@ -94,6 +122,26 @@ impl Plugin for DevPlugin {
                 .add_systems(First, run_input_script.before(PickingSystems::Input));
         }
     }
+}
+
+/// Applies `"-ssao,+taa"`-style changes.
+fn apply_lighting(techniques: &mut Techniques, changes: &str) -> Result<(), String> {
+    for change in changes.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+        let (on, name) = match change.split_at(1) {
+            ("+", name) => (true, name),
+            ("-", name) => (false, name),
+            _ => return Err(format!("expected +name or -name, got {change:?}")),
+        };
+        let switch = match name {
+            "ssao" => &mut techniques.ssao,
+            "taa" => &mut techniques.taa,
+            "contact" => &mut techniques.contact_shadows,
+            "volumetric" => &mut techniques.volumetric,
+            _ => return Err(format!("unknown technique {name:?}")),
+        };
+        *switch = on;
+    }
+    Ok(())
 }
 
 #[derive(Resource)]
@@ -334,6 +382,20 @@ mod tests {
         assert!(parse_script("1 jump").is_err());
         assert!(parse_script("x down").is_err());
         assert!(parse_script("1 key f13").is_err());
+    }
+
+    #[test]
+    fn switches_lighting_techniques() {
+        let mut techniques = Techniques::default();
+        apply_lighting(&mut techniques, "-ssao, +taa,,+volumetric").unwrap();
+        assert!(!techniques.ssao);
+        assert!(techniques.taa);
+        assert!(techniques.volumetric);
+        assert!(techniques.contact_shadows, "untouched");
+        apply_lighting(&mut techniques, "-contact").unwrap();
+        assert!(!techniques.contact_shadows);
+        assert!(apply_lighting(&mut techniques, "ssao").is_err());
+        assert!(apply_lighting(&mut techniques, "+raytracing").is_err());
     }
 
     #[test]

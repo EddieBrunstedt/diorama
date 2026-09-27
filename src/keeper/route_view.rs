@@ -77,7 +77,7 @@ pub(super) fn draw_route(
         let dot = commands
             .spawn((
                 RouteDot,
-                particles.cube(palette::ROUTE),
+                particles.marker(palette::ROUTE),
                 Transform::from_scale(Vec3::ZERO),
                 Visibility::Hidden,
                 NotShadowCaster,

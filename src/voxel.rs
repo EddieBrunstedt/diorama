@@ -38,6 +38,28 @@ impl FromWorld for VoxelMaterial {
     }
 }
 
+/// How much brighter than their colors markers are drawn.
+const MARKER_BRIGHTNESS: f32 = 1.6;
+
+/// A vertex-colored material that ignores the lighting, for markers that must stay clear in every
+/// mood (route dots, aim dots). The vertex colors still carry the faces' baked shading.
+#[derive(Resource)]
+pub struct MarkerMaterial(pub Handle<StandardMaterial>);
+
+impl FromWorld for MarkerMaterial {
+    fn from_world(world: &mut World) -> Self {
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        Self(materials.add(StandardMaterial {
+            // A little brighter than white, so markers stay bright after tonemapping.
+            base_color:
+                LinearRgba::rgb(MARKER_BRIGHTNESS, MARKER_BRIGHTNESS, MARKER_BRIGHTNESS).into(),
+            unlit: true,
+            fog_enabled: false,
+            ..default()
+        }))
+    }
+}
+
 /// Accumulates colored cuboids (in voxel units) into one mesh.
 #[derive(Default)]
 pub struct VoxelMesh {

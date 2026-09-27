@@ -14,6 +14,7 @@ use crate::catapult;
 use crate::island::cell_to_world;
 use crate::juice::{Burst, Particles, Shake, Squash, Tween, Wobble};
 use crate::keeper::Building;
+use crate::lamps::{self, GlowMaterials, Lamp};
 use crate::palette;
 use crate::phase::GameState;
 use crate::rng::Rng;
@@ -45,6 +46,14 @@ const BROKEN_SAG: f32 = 0.86;
 const CREAK_INTERVAL: f32 = 1.3;
 /// Height above the tower's base for popups.
 const POPUP_HEIGHT: f32 = 1.2;
+/// Where the lantern hangs from the lookout platform (voxels): on the corner facing the camera.
+const LANTERN_HOOK: Vec3 = Vec3::new(3.0, 6.8, 3.0);
+/// The lantern's glass, below the hook (voxels).
+const LANTERN_GLASS: Vec3 = Vec3::new(0.0, -1.25, 0.0);
+const LANTERN_GLASS_SIZE: Vec3 = Vec3::new(0.7, 1.0, 0.7);
+/// How brightly a lantern lights the tower and the road at full dusk, and how far.
+const LANTERN_LUMENS: f32 = 20_000.0;
+const LANTERN_RANGE: f32 = 2.4;
 
 pub struct TowersPlugin;
 
@@ -63,6 +72,7 @@ impl Plugin for TowersPlugin {
                     shooting::shoot.run_if(in_state(GameState::Wave)),
                     shooting::fly_arrows,
                     (take_spits, do_tower_work, creak_broken_towers).chain(),
+                    douse_lanterns,
                 ),
             );
     }
@@ -74,6 +84,8 @@ pub struct Tower {
     pub cell: IVec2,
     pub body: Entity,
     pub health: TowerHealth,
+    /// The lantern's glass and its light, which go out while the tower is broken.
+    lantern: (Entity, Entity),
 }
 
 /// A building going up. `body` is the child that squashes when hammered.
@@ -125,7 +137,14 @@ pub struct TowerAssets {
     ghost_ok: Handle<StandardMaterial>,
     ghost_problem: Handle<StandardMaterial>,
     arrow: Handle<Mesh>,
+    lantern: Handle<Mesh>,
+    cube: Handle<Mesh>,
     voxel: Handle<StandardMaterial>,
+    /// Lantern glass, lit and out.
+    lamp: Handle<StandardMaterial>,
+    lamp_out: Handle<StandardMaterial>,
+    /// Goo glows like the slimes it came from.
+    goo_material: Handle<StandardMaterial>,
 }
 
 impl FromWorld for TowerAssets {
@@ -134,6 +153,8 @@ impl FromWorld for TowerAssets {
         let tower = meshes.add(tower_mesh().build());
         let site = meshes.add(site_mesh().build());
         let arrow = meshes.add(shooting::arrow_mesh().build());
+        let lantern = meshes.add(lantern_mesh().build());
+        let cube = meshes.add(Cuboid::from_length(1.0));
         let mut ghost = tower_mesh().build();
         ghost.remove_attribute(Mesh::ATTRIBUTE_COLOR);
         let ghost = meshes.add(ghost);
@@ -142,6 +163,9 @@ impl FromWorld for TowerAssets {
         let catapult_ghost = meshes.add(catapult_ghost);
         let goo = meshes.add(goo_mesh().build());
         let voxel = world.resource::<VoxelMaterial>().0.clone();
+        let glow = world.get_resource_or_init::<GlowMaterials>();
+        let (lamp, lamp_out, goo_material) =
+            (glow.lamp.clone(), glow.lamp_out.clone(), glow.slime.clone());
         // Solid, softly glowing blueprints: see-through ghosts of a mesh made of overlapping
         // boxes show every inner face and turn into a smear.
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
@@ -163,7 +187,12 @@ impl FromWorld for TowerAssets {
             ghost_ok: blueprint(palette::BLUEPRINT),
             ghost_problem: blueprint(palette::BLUEPRINT_PROBLEM),
             arrow,
+            lantern,
+            cube,
             voxel,
+            lamp,
+            lamp_out,
+            goo_material,
         }
     }
 }
@@ -226,11 +255,39 @@ pub fn finish_tower(
             ChildOf(root),
         ))
         .id();
+    let hook = commands
+        .spawn((
+            Mesh3d(assets.lantern.clone()),
+            MeshMaterial3d(voxel.0.clone()),
+            Transform::from_translation(LANTERN_HOOK * VOXEL),
+            NotShadowCaster,
+            ChildOf(body),
+        ))
+        .id();
+    let glass = commands
+        .spawn((
+            Mesh3d(assets.cube.clone()),
+            MeshMaterial3d(assets.lamp.clone()),
+            Transform::from_translation(LANTERN_GLASS * VOXEL)
+                .with_scale(LANTERN_GLASS_SIZE * VOXEL),
+            NotShadowCaster,
+            ChildOf(hook),
+        ))
+        .id();
+    let phase = (cell.x * 7 + cell.y * 13) as f32;
+    let light = commands
+        .spawn((
+            lamps::lamp(LANTERN_LUMENS, LANTERN_RANGE, phase),
+            Transform::from_translation(LANTERN_GLASS * VOXEL),
+            ChildOf(hook),
+        ))
+        .id();
     commands.entity(root).insert((
         Tower {
             cell,
             body,
             health: TowerHealth::default(),
+            lantern: (glass, light),
         },
         Landing { body },
         Archer::new(body),
@@ -332,7 +389,7 @@ fn take_spits(
         commands.spawn((
             Goo,
             Mesh3d(assets.goo.clone()),
-            MeshMaterial3d(assets.voxel.clone()),
+            MeshMaterial3d(assets.goo_material.clone()),
             Transform::from_translation(local),
             Visibility::Hidden,
             Tween::pop_in(Vec3::ONE, 0.0),
@@ -513,6 +570,28 @@ fn creak_broken_towers(
     }
 }
 
+/// A broken tower's lantern goes out, and comes back on when it's repaired.
+fn douse_lanterns(
+    towers: Query<&Tower>,
+    mut glasses: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut lamps: Query<&mut Lamp>,
+    assets: Res<TowerAssets>,
+) {
+    for tower in &towers {
+        let (glass, light) = tower.lantern;
+        let lit = !tower.health.is_broken();
+        if let Ok(mut lamp) = lamps.get_mut(light) {
+            lamp.lit = lit;
+        }
+        if let Ok(mut material) = glasses.get_mut(glass) {
+            let want = if lit { &assets.lamp } else { &assets.lamp_out };
+            if material.0 != *want {
+                material.0 = want.clone();
+            }
+        }
+    }
+}
+
 /// Squash and a puff of dust when a dropping tower hits the ground.
 fn land_towers(
     mut commands: Commands,
@@ -669,6 +748,33 @@ fn tower_mesh() -> VoxelMesh {
         Vec3::new(0.12, bottom + 1.2, -0.08),
         Vec3::new(1.4, bottom + 1.9, 0.08),
         palette::FLAG,
+    );
+    mesh
+}
+
+/// A lantern's rope, cap and base, in voxels below its hook. The glass between them glows.
+fn lantern_mesh() -> VoxelMesh {
+    let mut mesh = VoxelMesh::default();
+    let iron = shade(palette::KEEPER_EYES, 1.4);
+    mesh.cuboid(
+        Vec3::new(-0.08, -0.6, -0.08),
+        Vec3::new(0.08, 0.0, 0.08),
+        palette::ROPE,
+    );
+    mesh.cuboid(
+        Vec3::new(-0.5, -0.75, -0.5),
+        Vec3::new(0.5, -0.6, 0.5),
+        iron,
+    );
+    mesh.cuboid(
+        Vec3::new(-0.25, -0.85, -0.25),
+        Vec3::new(0.25, -0.75, 0.25),
+        iron,
+    );
+    mesh.cuboid(
+        Vec3::new(-0.45, -1.9, -0.45),
+        Vec3::new(0.45, -1.75, 0.45),
+        iron,
     );
     mesh
 }
