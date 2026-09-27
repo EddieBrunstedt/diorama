@@ -1,315 +1,265 @@
-//! The fixed diorama camera: an angled overview of the whole island, plus post-processing.
+//! The overview camera: steep perspective, looking straight up the map so grid rows stay level
+//! on screen. It frames the whole map at the start.
+//!
+//! Pan with WASD or the arrow keys, or drag with the middle mouse button (the ground under the
+//! cursor sticks to it). Scroll to zoom toward the cursor.
 
-use crate::island::{Island, cell_to_world};
+use crate::dev::ScriptedCursor;
+use crate::grid::Grid;
 use crate::juice::Shake;
-use crate::mood::{CurrentMood, Mood, MoodSystems};
-use crate::voxel::TILE_SIZE;
+use crate::pointer::{PointerSystems, cursor_position};
+use crate::tuning::camera::*;
+use crate::tuning::juice::SHAKE_MAX_OFFSET;
 use bevy::{
-    anti_alias::{smaa::Smaa, taa::TemporalAntiAliasing},
-    core_pipeline::tonemapping::Tonemapping,
-    light::VolumetricFog,
-    pbr::{ContactShadows, ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel},
-    post_process::{bloom::Bloom, effect_stack::Vignette},
+    input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
     prelude::*,
-    render::view::{ColorGrading, ColorGradingGlobal},
     window::PrimaryWindow,
 };
 
-/// Size of the vignette's clear middle, and how softly it falls off toward the corners.
-const VIGNETTE_RADIUS: f32 = 0.8;
-const VIGNETTE_SMOOTHNESS: f32 = 2.0;
-/// Narrow field of view: less perspective distortion, more "miniature on a table".
-const FOV_DEGREES: f32 = 28.0;
-/// How far the camera looks down.
-const PITCH_DEGREES: f32 = 40.0;
-/// Rotation around the island (0 = looking north from the south).
-const YAW_DEGREES: f32 = 32.0;
-/// Camera distance as a multiple of the island's radius. Lower is closer.
-/// Leaves room around the island for UI and for the island to grow.
-const FRAMING: f32 = 6.6;
-/// Seen from this angle the island is about as wide as it is tall on screen, so only windows
-/// narrower than this move the camera back to keep it in view horizontally.
-const MIN_ASPECT: f32 = 1.2;
-/// Where the camera looks: a bit below the surface, so the floating rock is framed too.
-const LOOK_AT: Vec3 = Vec3::new(0.0, -0.45, 0.0);
-/// How quickly the camera eases to a new framing (per second, exponential), e.g. when the island
-/// grows or UI covers part of the screen.
-const REFRAME_RATE: f32 = 4.0;
-/// Room (logical pixels) kept between the island and the window's edge or UI covering it.
-const UI_MARGIN: f32 = 20.0;
-/// How much bigger than the starting island (on screen) the island may grow before the camera
-/// moves to keep it in view.
-const GROWTH_ROOM: f32 = 1.3;
+/// Scroll "lines" per pixel, for touchpads that scroll in pixels.
+const PIXELS_PER_LINE: f32 = 40.0;
 
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CoveredRight>()
-            .init_resource::<Techniques>()
+        app.init_resource::<CameraRig>()
             .add_systems(Startup, spawn_camera)
-            .add_systems(Update, (frame_island, grade_view.after(MoodSystems)));
+            .add_systems(
+                Update,
+                (control_camera, place_camera)
+                    .chain()
+                    .before(PointerSystems),
+            );
     }
 }
 
-/// The main camera, for turning the cursor into a ray and world points into screen points.
 #[derive(Component)]
-pub struct DioramaCamera;
+pub struct MainCamera;
 
-/// Which rendering techniques are on. `DIORAMA_LIGHTING` turns single ones off (or on) to compare looks and measure what each costs (see `dev.rs`).
+/// Where the camera looks and from how far. The camera's transform is this plus screen shake;
+/// picking uses this, so the cell under the cursor doesn't jitter with the shake.
 #[derive(Resource, Clone, Copy, Debug)]
-pub struct Techniques {
-    /// Screen-space ambient occlusion: soft shade in the creases between voxels.
-    pub ssao: bool,
-    /// Temporal anti-aliasing instead of SMAA. Smooths SSAO noise, but smears small fast things.
-    pub taa: bool,
-    /// Screen-space contact shadows from the sun, for small details the shadow map misses.
-    pub contact_shadows: bool,
-    /// Volumetric fog around the island, with light shafts from the sun and the hearth. Off: it
-    /// cost about 1 ms of GPU time and only made the island hazier and muddier.
-    pub volumetric: bool,
+pub struct CameraRig {
+    /// The ground point in the middle of the view (world x and z).
+    pub focus: Vec2,
+    pub distance: f32,
+    /// The distance the zoom is easing toward.
+    pub target_distance: f32,
+    /// Where a middle-button drag grabbed the ground.
+    grab: Option<Vec3>,
+    /// The map plus some room around it: the focus stays inside (world x and z).
+    limits: Rect,
 }
 
-impl Default for Techniques {
+impl Default for CameraRig {
     fn default() -> Self {
         Self {
-            ssao: true,
-            taa: false,
-            contact_shadows: true,
-            volumetric: false,
+            focus: Vec2::ZERO,
+            distance: MAX_DISTANCE,
+            target_distance: MAX_DISTANCE,
+            grab: None,
+            limits: Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(f32::MAX)),
         }
     }
 }
 
-/// How much of the screen's right side UI is covering (logical pixels), e.g. the tile offer.
-/// The camera slides the island to the left to keep it clear, if there's room.
-#[derive(Resource, Default)]
-pub struct CoveredRight(pub f32);
+impl CameraRig {
+    /// The camera's transform without shake.
+    pub fn transform(&self) -> Transform {
+        let pitch = PITCH_DEGREES.to_radians();
+        let focus = Vec3::new(self.focus.x, 0.0, self.focus.y);
+        let back = Vec3::new(0.0, pitch.sin(), pitch.cos());
+        Transform::from_translation(focus + back * self.distance).looking_at(focus, Vec3::Y)
+    }
 
-fn spawn_camera(mut commands: Commands, island: Res<Island>, techniques: Res<Techniques>) {
-    let calm = Mood::CALM;
-    let fov = FOV_DEGREES.to_radians();
-    let distance = camera_distance(&island, 16.0 / 9.0);
-    let camera = commands
-        .spawn((
-            DioramaCamera,
-            Camera3d::default(),
-            Projection::Perspective(PerspectiveProjection { fov, ..default() }),
-            camera_transform(distance),
-            Tonemapping::TonyMcMapface,
-            ColorGrading::default(),
-            Bloom {
-                intensity: calm.bloom,
-                ..Bloom::NATURAL
-            },
-            Vignette {
-                intensity: calm.vignette,
-                radius: VIGNETTE_RADIUS,
-                smoothness: VIGNETTE_SMOOTHNESS,
-                ..default()
-            },
-            DistanceFog {
-                color: calm.fog,
-                falloff: fog_falloff(distance),
-                ..default()
-            },
-            // SSAO needs MSAA off; SMAA (or TAA) smooths the edges instead.
-            Msaa::Off,
-        ))
-        .id();
-    if techniques.taa {
-        commands
-            .entity(camera)
-            .insert(TemporalAntiAliasing::default());
-    } else {
-        commands.entity(camera).insert(Smaa::default());
-    }
-    if techniques.contact_shadows {
-        commands.entity(camera).insert(ContactShadows {
-            length: 0.15,
-            thickness: 0.05,
-            ..default()
-        });
-    }
-    if techniques.volumetric {
-        commands.entity(camera).insert(VolumetricFog {
-            ambient_intensity: 0.0,
-            ..default()
-        });
-    }
-    if techniques.ssao {
-        commands.entity(camera).insert(ScreenSpaceAmbientOcclusion {
-            quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
-            ..default()
-        });
+    /// The ground point under a screen position.
+    pub fn ground_point(&self, camera: &Camera, screen: Vec2) -> Option<Vec3> {
+        ground_point(camera, &GlobalTransform::from(self.transform()), screen)
     }
 }
 
-/// The camera's post-processing follows the mood: exposure, white balance, saturation, bloom,
-/// vignette and the color of the distance fog.
-fn grade_view(
-    current: Res<CurrentMood>,
-    mut camera: Single<
-        (
-            &mut ColorGrading,
-            &mut Bloom,
-            &mut Vignette,
-            &mut DistanceFog,
-        ),
-        With<DioramaCamera>,
-    >,
-) {
-    if !current.is_changed() {
-        return;
-    }
-    let mood = &current.mood;
-    let (grading, bloom, vignette, fog) = &mut *camera;
-    grading.global = ColorGradingGlobal {
-        exposure: mood.exposure,
-        temperature: mood.temperature,
-        post_saturation: mood.saturation,
-        ..default()
+/// Where a screen position's ray hits the ground plane.
+pub fn ground_point(camera: &Camera, transform: &GlobalTransform, screen: Vec2) -> Option<Vec3> {
+    let ray = camera.viewport_to_world(transform, screen).ok()?;
+    ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+}
+
+/// The closest distance at which the whole map fits in view, looking at its middle.
+fn framing_distance(map: Rect, aspect: f32) -> f32 {
+    let tan = (FOV_DEGREES.to_radians() / 2.0).tan() / FRAMING_MARGIN;
+    let corners = [
+        map.min,
+        Vec2::new(map.min.x, map.max.y),
+        Vec2::new(map.max.x, map.min.y),
+        map.max,
+    ];
+    let fits = |distance: f32| {
+        let rig = CameraRig {
+            focus: map.center(),
+            distance,
+            ..default()
+        };
+        let view = rig.transform().to_matrix().inverse();
+        corners.iter().all(|corner| {
+            let p = view.transform_point3(Vec3::new(corner.x, 0.0, corner.y));
+            let depth = -p.z;
+            depth > 0.0 && (p.x / depth).abs() <= tan * aspect && (p.y / depth).abs() <= tan
+        })
     };
-    bloom.intensity = mood.bloom;
-    vignette.intensity = mood.vignette;
-    fog.color = mood.fog;
-}
-
-fn camera_distance(island: &Island, aspect: f32) -> f32 {
-    island.world_radius() * FRAMING * (MIN_ASPECT / aspect).max(1.0)
-}
-
-fn camera_transform(distance: f32) -> Transform {
-    let (yaw, pitch) = (YAW_DEGREES.to_radians(), PITCH_DEGREES.to_radians());
-    let direction = Vec3::new(
-        yaw.sin() * pitch.cos(),
-        pitch.sin(),
-        yaw.cos() * pitch.cos(),
-    );
-    Transform::from_translation(LOOK_AT + direction * distance).looking_at(LOOK_AT, Vec3::Y)
-}
-
-/// Fog starts just past the island, so clouds and the sky fade into haze but the island stays crisp.
-fn fog_falloff(distance: f32) -> FogFalloff {
-    FogFalloff::Linear {
-        start: distance + 4.0,
-        end: distance + 45.0,
+    if fits(MIN_DISTANCE) {
+        return MIN_DISTANCE;
     }
+    let (mut low, mut high) = (MIN_DISTANCE, MAX_DISTANCE);
+    for _ in 0..24 {
+        let middle = (low + high) / 2.0;
+        if fits(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    high
 }
 
-/// Keeps the island in view as it grows and when the window is resized, keeps it clear of UI
-/// covering the right side, and shakes the camera.
-///
-/// The framing is tuned for the starting island, with room around it to grow. The island may
-/// grow into that room (a bit past the starting island's size on screen) before the camera slides
-/// or backs off to keep it all in view.
-fn frame_island(
-    time: Res<Time>,
-    island: Res<Island>,
-    shake: Res<Shake>,
-    covered: Res<CoveredRight>,
+fn spawn_camera(
+    mut commands: Commands,
+    grid: Res<Grid>,
     window: Single<&Window, With<PrimaryWindow>>,
-    mut camera: Single<(&Camera, &mut Transform, &mut DistanceFog), With<DioramaCamera>>,
-    mut starting: Local<Option<Island>>,
-    mut framed_at: Local<Option<f32>>,
-    mut pan: Local<Vec2>,
+    mut rig: ResMut<CameraRig>,
 ) {
-    let size = window.size();
-    let aspect = size.x / size.y.max(1.0);
-    if !aspect.is_finite() {
-        return;
+    if let Some(bounds) = grid.bounds() {
+        let min = bounds.min.as_vec2();
+        let max = (bounds.max + IVec2::ONE).as_vec2();
+        let map = Rect::from_corners(min, max);
+        rig.limits = map.inflate(PAN_OVERSCROLL);
+        rig.focus = map.center();
+        let aspect = window.width() / window.height().max(1.0);
+        rig.distance = framing_distance(map, aspect);
+        rig.target_distance = rig.distance;
     }
-    let starting = starting.get_or_insert_with(Island::starting);
-    let (camera, transform, fog) = &mut *camera;
-    let base = camera_distance(starting, aspect);
-    let base_transform = camera_transform(base);
-
-    // Where the island may be on screen: its starting size plus room to grow, inside the window
-    // and clear of covering UI.
-    let Some(start) = screen_bounds(camera, &base_transform, starting.tiles().map(|(c, _)| c))
-    else {
-        return;
-    };
-    let mut room = Rect::from_center_half_size(start.center(), start.half_size() * GROWTH_ROOM);
-    room.min = room.min.max(Vec2::splat(UI_MARGIN));
-    room.max = room
-        .max
-        .min(size - Vec2::new(covered.0 + UI_MARGIN, UI_MARGIN));
-    // While placing a tile, the free spots around the island count too.
-    let cells: Vec<IVec2> = if covered.0 > 0.0 {
-        island
-            .tiles()
-            .map(|(cell, _)| cell)
-            .chain(island.edge_cells())
-            .collect()
-    } else {
-        island.tiles().map(|(cell, _)| cell).collect()
-    };
-    let Some(needed) = screen_bounds(camera, &base_transform, cells.iter().copied()) else {
-        return;
-    };
-    // On screen, sizes shrink in proportion to the distance.
-    let zoom = (needed.size() / room.size().max(Vec2::ONE))
-        .max_element()
-        .max(1.0);
-    let wanted = base * zoom;
-
-    let ease = 1.0 - (-REFRAME_RATE * time.delta_secs()).exp();
-    let distance = match *framed_at {
-        // Snap on the first frame and when the window is resized a lot; ease otherwise.
-        Some(current) if (current - wanted).abs() < wanted * 0.5 => current.lerp(wanted, ease),
-        _ => wanted,
-    };
-    let mut framed = camera_transform(distance);
-
-    // Slide the island (by moving the camera the other way) just enough to bring it into its room.
-    let wanted_pan =
-        screen_bounds(camera, &framed, cells.iter().copied()).map_or(Vec2::ZERO, |at| {
-            let push = |low: f32, high: f32, min: f32, max: f32| {
-                if high > max {
-                    (high - max).min(low - min).max(0.0)
-                } else if low < min {
-                    -(min - low).min(max - high).max(0.0)
-                } else {
-                    0.0
-                }
-            };
-            Vec2::new(
-                push(at.min.x, at.max.x, room.min.x, room.max.x),
-                push(at.min.y, at.max.y, room.min.y, room.max.y),
-            )
-        });
-    *pan = pan.lerp(wanted_pan, ease);
-    let fov = FOV_DEGREES.to_radians();
-    let world_per_pixel = 2.0 * distance * (fov / 2.0).tan() / size.y.max(1.0);
-    // Screen y points down, camera y up.
-    let offset = shake.offset(time.elapsed_secs()) + Vec2::new(pan.x, -pan.y) * world_per_pixel;
-    framed.translation += framed.rotation * Vec3::new(offset.x, offset.y, 0.0);
-    transform.set_if_neq(framed);
-    if framed_at.is_none_or(|at| (at - distance).abs() > 0.01) {
-        fog.falloff = fog_falloff(distance);
-    }
-    *framed_at = Some(distance);
+    commands.spawn((
+        MainCamera,
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: FOV_DEGREES.to_radians(),
+            ..default()
+        }),
+        rig.transform(),
+    ));
 }
 
-/// The screen rectangle covering the surfaces of `cells`, seen from `transform`.
-fn screen_bounds(
-    camera: &Camera,
-    transform: &Transform,
-    cells: impl Iterator<Item = IVec2>,
-) -> Option<Rect> {
-    let global = GlobalTransform::from(*transform);
-    let half = TILE_SIZE / 2.0;
-    cells
-        .flat_map(|cell| {
-            let center = cell_to_world(cell);
-            [(-half, -half), (half, -half), (-half, half), (half, half)]
-                .map(|(x, z)| center + Vec3::new(x, 0.0, z))
-        })
-        .filter_map(|corner| camera.world_to_viewport(&global, corner).ok())
-        .fold(None, |bounds: Option<Rect>, point| {
-            Some(bounds.map_or(Rect::from_corners(point, point), |bounds| {
-                bounds.union_point(point)
-            }))
-        })
+fn control_camera(
+    time: Res<Time<Real>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    scripted: Option<Res<ScriptedCursor>>,
+    camera: Single<&Camera, With<MainCamera>>,
+    mut rig: ResMut<CameraRig>,
+) {
+    // Real time, so the camera moves the same during hit-stop or a dev speed-up.
+    let dt = time.delta_secs();
+    let cursor = cursor_position(&window, scripted.as_deref());
+
+    // Keyboard pan. Holding Ctrl leaves the keys to shortcuts (Ctrl+Z is not "pan left").
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let mut pan = Vec2::ZERO;
+    if !ctrl {
+        for (key, arrow, direction) in [
+            (KeyCode::KeyW, KeyCode::ArrowUp, Vec2::NEG_Y),
+            (KeyCode::KeyS, KeyCode::ArrowDown, Vec2::Y),
+            (KeyCode::KeyA, KeyCode::ArrowLeft, Vec2::NEG_X),
+            (KeyCode::KeyD, KeyCode::ArrowRight, Vec2::X),
+        ] {
+            if keys.any_pressed([key, arrow]) {
+                pan += direction;
+            }
+        }
+    }
+    let speed = PAN_SPEED * rig.distance;
+    rig.focus += pan.normalize_or_zero() * speed * dt;
+
+    // Zoom, keeping the ground under the cursor where it is.
+    let lines = match scroll.unit {
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
+    };
+    if lines != 0.0 {
+        rig.target_distance =
+            (rig.target_distance * (1.0 - ZOOM_STEP).powf(lines)).clamp(MIN_DISTANCE, MAX_DISTANCE);
+    }
+    if rig.distance != rig.target_distance {
+        let before = cursor.and_then(|cursor| rig.ground_point(&camera, cursor));
+        let ease = 1.0 - (-ZOOM_EASE_RATE * dt).exp();
+        rig.distance = rig.distance.lerp(rig.target_distance, ease);
+        if (rig.distance - rig.target_distance).abs() < 0.01 {
+            rig.distance = rig.target_distance;
+        }
+        let after = cursor.and_then(|cursor| rig.ground_point(&camera, cursor));
+        if let (Some(before), Some(after)) = (before, after) {
+            rig.focus += (before - after).xz();
+        }
+    }
+
+    // Middle-button drag: move the camera so the grabbed ground point stays under the cursor.
+    if buttons.just_pressed(MouseButton::Middle) {
+        rig.grab = cursor.and_then(|cursor| rig.ground_point(&camera, cursor));
+    }
+    if !buttons.pressed(MouseButton::Middle) {
+        rig.grab = None;
+    }
+    if let Some(grab) = rig.grab
+        && let Some(under) = cursor.and_then(|cursor| rig.ground_point(&camera, cursor))
+    {
+        rig.focus += (grab - under).xz();
+    }
+
+    let limits = rig.limits;
+    rig.focus = rig.focus.clamp(limits.min, limits.max);
+}
+
+/// Puts the camera where the rig says, plus shake.
+fn place_camera(
+    time: Res<Time<Real>>,
+    rig: Res<CameraRig>,
+    shake: Res<Shake>,
+    mut transform: Single<&mut Transform, With<MainCamera>>,
+) {
+    let mut placed = rig.transform();
+    let offset = shake.offset(time.elapsed_secs()) * SHAKE_MAX_OFFSET * rig.distance;
+    placed.translation += placed.rotation * offset.extend(0.0);
+    transform.set_if_neq(placed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn framing_backs_off_for_bigger_maps_and_narrow_windows() {
+        let square = |size| Rect::from_center_size(Vec2::ZERO, Vec2::splat(size));
+        let small = framing_distance(square(20.0), 16.0 / 9.0);
+        let big = framing_distance(square(40.0), 16.0 / 9.0);
+        let narrow = framing_distance(square(20.0), 0.5);
+        assert!(big > small);
+        assert!(narrow > small);
+    }
+
+    #[test]
+    fn the_rig_looks_at_its_focus() {
+        let rig = CameraRig {
+            focus: Vec2::new(3.0, -2.0),
+            distance: 30.0,
+            ..default()
+        };
+        let transform = rig.transform();
+        let ray = Ray3d::new(transform.translation, transform.forward());
+        let hit = ray
+            .plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+            .unwrap();
+        assert!(hit.xz().distance(rig.focus) < 1e-3);
+        assert!((transform.translation.distance(hit) - 30.0).abs() < 1e-3);
+    }
 }

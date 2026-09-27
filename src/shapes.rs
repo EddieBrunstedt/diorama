@@ -1,8 +1,7 @@
-//! Building voxel models out of cuboids in code.
+//! Building grey-box meshes out of boxes in code.
 //!
-//! Models are authored in voxel units (one tile is [`VOXELS_PER_TILE`] voxels wide) and merged into
-//! a single mesh with per-vertex colors, so one shared material covers everything and every voxel
-//! can have its own slightly varied color.
+//! Boxes are merged into one mesh with per-vertex colors, so one shared material covers
+//! everything and each box can have its own color.
 
 use crate::rng::Rng;
 use bevy::{
@@ -11,22 +10,15 @@ use bevy::{
     prelude::*,
 };
 
-/// Voxels along one side of a grid tile.
-pub const VOXELS_PER_TILE: f32 = 10.0;
-/// World units per voxel.
-pub const VOXEL: f32 = 0.1;
-/// World units per grid tile.
-pub const TILE_SIZE: f32 = VOXELS_PER_TILE * VOXEL;
+/// How much darker the bottom edge of a box's side faces is than the top edge. A cheap stand-in
+/// for ambient occlusion that grounds things.
+const SIDE_BOTTOM_SHADE: f32 = 0.7;
 
-/// How much darker the bottom edge of a cuboid's side faces is than the top edge.
-/// A cheap stand-in for ambient occlusion that makes stacked voxels read clearly.
-const SIDE_BOTTOM_SHADE: f32 = 0.82;
-
-/// The shared vertex-colored material used by all voxel meshes.
+/// The shared vertex-colored material for [`BoxMesh`] meshes.
 #[derive(Resource)]
-pub struct VoxelMaterial(pub Handle<StandardMaterial>);
+pub struct ShapeMaterial(pub Handle<StandardMaterial>);
 
-impl FromWorld for VoxelMaterial {
+impl FromWorld for ShapeMaterial {
     fn from_world(world: &mut World) -> Self {
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         Self(materials.add(StandardMaterial {
@@ -38,39 +30,17 @@ impl FromWorld for VoxelMaterial {
     }
 }
 
-/// How much brighter than their colors markers are drawn.
-const MARKER_BRIGHTNESS: f32 = 1.6;
-
-/// A vertex-colored material that ignores the lighting, for markers that must stay clear in every
-/// mood (route dots, aim dots). The vertex colors still carry the faces' baked shading.
-#[derive(Resource)]
-pub struct MarkerMaterial(pub Handle<StandardMaterial>);
-
-impl FromWorld for MarkerMaterial {
-    fn from_world(world: &mut World) -> Self {
-        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        Self(materials.add(StandardMaterial {
-            // A little brighter than white, so markers stay bright after tonemapping.
-            base_color:
-                LinearRgba::rgb(MARKER_BRIGHTNESS, MARKER_BRIGHTNESS, MARKER_BRIGHTNESS).into(),
-            unlit: true,
-            fog_enabled: false,
-            ..default()
-        }))
-    }
-}
-
-/// Accumulates colored cuboids (in voxel units) into one mesh.
+/// Accumulates colored boxes into one mesh.
 #[derive(Default)]
-pub struct VoxelMesh {
+pub struct BoxMesh {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
-impl VoxelMesh {
-    /// A box from `min` to `max`, with side faces slightly darker toward the bottom.
+impl BoxMesh {
+    /// A box from `min` to `max`, with side faces darker toward the bottom.
     pub fn cuboid(&mut self, min: Vec3, max: Vec3, color: Color) {
         self.cuboid_graded(min, max, color, shade(color, SIDE_BOTTOM_SHADE));
     }
@@ -93,11 +63,9 @@ impl VoxelMesh {
         for (corner, u, v, normal) in faces {
             let base = self.positions.len() as u32;
             for p in [corner, corner + u, corner + u + v, corner + v] {
-                self.positions.push((p * VOXEL).to_array());
+                self.positions.push(p.to_array());
                 self.normals.push(normal.to_array());
-                let color = if normal == Vec3::Y {
-                    top
-                } else if normal == Vec3::NEG_Y || p.y <= min.y {
+                let color = if normal == Vec3::NEG_Y || (normal != Vec3::Y && p.y <= min.y) {
                     bottom
                 } else {
                     top
@@ -107,6 +75,24 @@ impl VoxelMesh {
             self.indices
                 .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
+    }
+
+    /// A flat, upward-facing rectangle at height `y`.
+    pub fn quad(&mut self, min: Vec2, max: Vec2, y: f32, color: Color) {
+        let color = color.to_linear().to_f32_array();
+        let base = self.positions.len() as u32;
+        for (x, z) in [
+            (min.x, min.y),
+            (min.x, max.y),
+            (max.x, max.y),
+            (max.x, min.y),
+        ] {
+            self.positions.push([x, y, z]);
+            self.normals.push([0.0, 1.0, 0.0]);
+            self.colors.push(color);
+        }
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
     pub fn build(self) -> Mesh {
@@ -127,7 +113,7 @@ pub fn shade(color: Color, factor: f32) -> Color {
     Color::linear_rgba(c.red * factor, c.green * factor, c.blue * factor, c.alpha)
 }
 
-/// Randomly nudges a color's lightness and hue, for a hand-painted look.
+/// Randomly nudges a color's lightness and hue, so large areas don't look flat.
 pub fn vary(color: Color, rng: &mut Rng, lightness: f32, hue: f32) -> Color {
     let mut c = Oklcha::from(color);
     c.lightness = (c.lightness + rng.range(-lightness, lightness)).clamp(0.0, 1.0);
@@ -135,20 +121,23 @@ pub fn vary(color: Color, rng: &mut Rng, lightness: f32, hue: f32) -> Color {
     c.into()
 }
 
-/// Four L-shaped corners around a tile, in voxels.
-pub fn bracket_mesh() -> VoxelMesh {
-    let mut mesh = VoxelMesh::default();
-    const OUTER: f32 = 5.2;
-    const ARM: f32 = 2.2;
-    const THICK: f32 = 0.7;
+/// Four L-shaped corners framing a 1×1 square centered on the origin, lying on the ground.
+/// `outer` is the half size of the frame, `arm` how far each corner reaches along an edge.
+pub fn bracket_mesh(outer: f32, arm: f32, thickness: f32, height: f32) -> Mesh {
+    let mut mesh = BoxMesh::default();
     for (sx, sz) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-        let corner = Vec3::new(sx * OUTER, 0.0, sz * OUTER);
-        let inward_x = Vec3::new(-sx * ARM, 0.5, -sz * THICK);
-        let inward_z = Vec3::new(-sx * THICK, 0.5, -sz * ARM);
-        for inward in [inward_x, inward_z] {
-            let other = corner + inward;
-            mesh.cuboid(corner.min(other), corner.max(other), Color::WHITE);
+        let corner = Vec3::new(sx * outer, 0.0, sz * outer);
+        let along_x = Vec3::new(-sx * arm, height, -sz * thickness);
+        let along_z = Vec3::new(-sx * thickness, height, -sz * arm);
+        for along in [along_x, along_z] {
+            let other = corner + along;
+            mesh.cuboid_graded(
+                corner.min(other),
+                corner.max(other),
+                Color::WHITE,
+                Color::WHITE,
+            );
         }
     }
-    mesh
+    mesh.build()
 }

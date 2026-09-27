@@ -1,29 +1,25 @@
-//! Island Keeper (code name "diorama"): a cozy voxel tower defense.
+//! Code name "diorama": a sci-fi roguelite tower defense. A human outpost holds out against an
+//! alien horde by shaping its path.
 //!
 //! `main` only wires plugins together; each feature area lives in its own module.
 
 // Bevy systems naturally take many parameters and spell out their queries.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+mod build;
 mod camera;
-mod catapult;
 mod dev;
 mod environment;
-mod hearth;
-mod island;
+mod grid;
+mod hud;
 mod juice;
-mod keeper;
-mod lamps;
-mod mood;
-mod offer;
+mod map;
 mod palette;
-mod phase;
+mod pointer;
 mod rng;
-mod slimes;
-mod towers;
+mod shapes;
+mod structures;
 mod tuning;
-mod ui;
-mod voxel;
 
 use bevy::prelude::*;
 
@@ -31,7 +27,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Island Keeper".into(),
+                title: "Diorama".into(),
                 resolution: (1600, 900).into(),
                 // Vsync off during development, so the FPS counter shows true performance.
                 present_mode: bevy::window::PresentMode::AutoNoVsync,
@@ -39,20 +35,15 @@ fn main() {
             }),
             ..default()
         }))
+        .init_resource::<rng::RunSeed>()
         .add_plugins((
             environment::EnvironmentPlugin,
+            map::MapPlugin,
             camera::CameraPlugin,
-            mood::MoodPlugin,
-            lamps::LampsPlugin,
-            island::IslandPlugin,
-            hearth::HearthPlugin,
-            towers::TowersPlugin,
-            catapult::CatapultPlugin,
-            slimes::SlimesPlugin,
-            phase::PhasePlugin,
-            keeper::KeeperPlugin,
-            offer::OfferPlugin,
-            ui::UiPlugin,
+            pointer::PointerPlugin,
+            build::BuildPlugin,
+            structures::StructuresPlugin,
+            hud::HudPlugin,
             juice::JuicePlugin,
             dev::DevPlugin,
         ))

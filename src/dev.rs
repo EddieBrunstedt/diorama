@@ -4,36 +4,29 @@
 //! - `DIORAMA_SCREENSHOT=shot.png cargo run` saves a screenshot after a few seconds and quits,
 //!   for checking visuals without clicking around. `DIORAMA_SCREENSHOT_AT` sets the time in
 //!   seconds; a comma-separated list takes several (`shot-1.png`, `shot-2.png`, ...).
-//! - `DIORAMA_DEMO=1` queues a few sample orders at startup. `DIORAMA_DEMO=catapult` starts with
-//!   a full backpack and queues a tower by the road and the catapult, then mans the catapult once
-//!   it stands, to try out the wave-phase actions.
-//! - `DIORAMA_SCRIPT="3 move 800 450; 3.1 down; 3.2 up"` fakes mouse input at the given times
-//!   (seconds): `move X Y` (logical pixels), `down`/`up` (left button), `shift`/`unshift`, and
-//!   `key K` to tap a key (a letter, a digit, or `esc`), e.g. `key b` rings the bell.
-//! - `DIORAMA_SPEED=4` runs the game four times as fast, e.g. to get to later waves quickly.
-//!   Screenshot and script times are in game time, so they speed up too.
-//! - `DIORAMA_SEED=7` fixes the random seed for the tile offers, so scripted runs repeat.
-//! - `DIORAMA_WAVE=4` starts the run at wave 4, e.g. to see slimes spit at towers.
-//! - `DIORAMA_MOOD=wave` holds the lighting in one mood (`calm`, `wave`, `offer` or `lost`),
-//!   whatever the phase, to compare moods side by side.
-//! - `DIORAMA_LIGHTING="-ssao,+taa"` turns rendering techniques off (`-`) or on (`+`), to compare
-//!   looks and costs (see [`crate::camera::Techniques`]).
+//! - `DIORAMA_SCRIPT="1 move 800 450; 1.1 down; 1.5 move 900 450; 1.6 up"` fakes input at the
+//!   given times (seconds):
+//!   - `move X Y` moves the cursor (logical pixels);
+//!   - `down` / `up` presses or releases a mouse button: `left` (the default), `right` or
+//!     `middle`, e.g. `2 down right`;
+//!   - `key K` taps a key, `hold K` / `release K` keep one down (a letter, a digit, `esc`,
+//!     `space`, `ctrl` or `shift`), e.g. `3 hold ctrl; 3.1 key z; 3.2 release ctrl` to undo;
+//!   - `scroll N` scrolls N lines (positive zooms in).
+//! - `DIORAMA_SPEED=4` runs the game four times as fast (0.25 for slow motion). Screenshot and
+//!   script times are in game time, so they speed up too.
+//! - `DIORAMA_SEED=7` fixes the random seed (see [`RunSeed`]), so scripted runs repeat.
 //! - `DIORAMA_GPU_TIMES=1` logs the GPU time of each render pass every few seconds (see [`gpu`]).
 
 mod fps;
 mod gpu;
 
-use crate::camera::Techniques;
-use crate::catapult::Catapult;
-use crate::island::TreeId;
-use crate::keeper::{Backpack, Building, OrderKind, OrderQueue};
-use crate::mood::{CurrentMood, ForcedMood, MoodKind};
-use crate::phase::Waves;
+use crate::rng::RunSeed;
 use bevy::{
     input::{
         ButtonState,
         keyboard::{Key, KeyboardInput, NativeKey},
-        mouse::MouseButtonInput,
+        mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel},
+        touch::TouchPhase,
     },
     picking::PickingSystems,
     prelude::*,
@@ -50,23 +43,6 @@ pub struct DevPlugin;
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(fps::FpsPlugin);
-        if let Ok(changes) = std::env::var("DIORAMA_LIGHTING") {
-            let mut techniques = Techniques::default();
-            apply_lighting(&mut techniques, &changes)
-                .unwrap_or_else(|error| panic!("DIORAMA_LIGHTING: {error}"));
-            app.insert_resource(techniques);
-        }
-        if let Ok(name) = std::env::var("DIORAMA_MOOD") {
-            let kind = match name.as_str() {
-                "calm" => MoodKind::Calm,
-                "wave" => MoodKind::Wave,
-                "offer" => MoodKind::Offer,
-                "lost" => MoodKind::Lost,
-                _ => panic!("DIORAMA_MOOD: unknown mood {name:?}"),
-            };
-            app.insert_resource(ForcedMood(Some(kind)))
-                .insert_resource(CurrentMood::new(kind));
-        }
         if std::env::var_os("DIORAMA_GPU_TIMES").is_some() {
             app.add_plugins(gpu::GpuTimesPlugin);
         }
@@ -87,33 +63,15 @@ impl Plugin for DevPlugin {
             })
             .add_systems(Update, auto_screenshot);
         }
-        match std::env::var("DIORAMA_DEMO").as_deref() {
-            Ok("catapult") => {
-                app.add_systems(Startup, queue_catapult_demo)
-                    .add_systems(Update, man_demo_catapult);
-            }
-            Ok(_) => {
-                app.add_systems(Startup, queue_demo_orders);
-            }
-            Err(_) => {}
-        }
-        if let Some(speed) = std::env::var("DIORAMA_SPEED")
-            .ok()
-            .and_then(|speed| speed.parse::<f32>().ok())
-        {
+        if let Some(speed) = env_number::<f32>("DIORAMA_SPEED") {
             app.add_systems(Startup, move |mut time: ResMut<Time<Virtual>>| {
                 time.set_relative_speed(speed);
                 // Let long frames through, so fast-forwarding doesn't slow down again.
                 time.set_max_delta(std::time::Duration::from_secs_f32(0.25 * speed));
             });
         }
-        if let Some(wave) = std::env::var("DIORAMA_WAVE")
-            .ok()
-            .and_then(|wave| wave.parse::<u32>().ok())
-        {
-            app.add_systems(Startup, move |mut waves: ResMut<Waves>| {
-                waves.completed = wave.saturating_sub(1);
-            });
+        if let Some(seed) = env_number::<u64>("DIORAMA_SEED") {
+            app.insert_resource(RunSeed(seed));
         }
         if let Ok(script) = std::env::var("DIORAMA_SCRIPT") {
             let steps =
@@ -124,24 +82,12 @@ impl Plugin for DevPlugin {
     }
 }
 
-/// Applies `"-ssao,+taa"`-style changes.
-fn apply_lighting(techniques: &mut Techniques, changes: &str) -> Result<(), String> {
-    for change in changes.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-        let (on, name) = match change.split_at(1) {
-            ("+", name) => (true, name),
-            ("-", name) => (false, name),
-            _ => return Err(format!("expected +name or -name, got {change:?}")),
-        };
-        let switch = match name {
-            "ssao" => &mut techniques.ssao,
-            "taa" => &mut techniques.taa,
-            "contact" => &mut techniques.contact_shadows,
-            "volumetric" => &mut techniques.volumetric,
-            _ => return Err(format!("unknown technique {name:?}")),
-        };
-        *switch = on;
-    }
-    Ok(())
+fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
+    let value = std::env::var(name).ok()?;
+    let number = value
+        .parse()
+        .unwrap_or_else(|_| panic!("{name}: not a number: {value:?}"));
+    Some(number)
 }
 
 #[derive(Resource)]
@@ -185,57 +131,6 @@ fn numbered(path: &str, number: usize) -> String {
     }
 }
 
-/// A mix of orders, including one without enough wood and a few that won't be done before the
-/// first wave.
-fn queue_demo_orders(mut queue: ResMut<OrderQueue>) {
-    let tree = |x, y, index| {
-        OrderKind::Chop(TreeId {
-            cell: IVec2::new(x, y),
-            index,
-        })
-    };
-    for kind in [
-        tree(-2, -1, 0),
-        tree(-2, -2, 0),
-        tree(-1, -2, 1),
-        OrderKind::tower(IVec2::new(-1, -1)),
-        OrderKind::Walk(Vec2::new(1.2, 1.3)),
-        OrderKind::tower(IVec2::new(0, 1)),
-        tree(-2, 1, 0),
-        tree(2, 1, 0),
-        tree(2, 2, 0),
-        OrderKind::tower(IVec2::new(1, 1)),
-    ] {
-        queue.push(kind);
-    }
-}
-
-/// A tower next to the road (where slimes will spit at it), and the catapult.
-fn queue_catapult_demo(mut queue: ResMut<OrderQueue>, mut backpack: ResMut<Backpack>) {
-    backpack.wood = backpack.capacity;
-    let tree = |x, y, index| {
-        OrderKind::Chop(TreeId {
-            cell: IVec2::new(x, y),
-            index,
-        })
-    };
-    for kind in [
-        OrderKind::tower(IVec2::new(2, -1)),
-        tree(2, 1, 0),
-        tree(2, 1, 1),
-        OrderKind::Build(IVec2::new(-1, 1), Building::Catapult),
-    ] {
-        queue.push(kind);
-    }
-}
-
-/// Mans the demo catapult as soon as it stands.
-fn man_demo_catapult(catapults: Query<&Catapult, Added<Catapult>>, mut queue: ResMut<OrderQueue>) {
-    for catapult in &catapults {
-        queue.push(OrderKind::Man(catapult.cell));
-    }
-}
-
 /// Where the fake mouse is. Present only while a script runs; overrides the real cursor.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ScriptedCursor(pub Vec2);
@@ -243,26 +138,72 @@ pub struct ScriptedCursor(pub Vec2);
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Step {
     Move(Vec2),
-    Down,
-    Up,
-    Shift(bool),
-    Key(KeyCode),
+    Button(MouseButton, ButtonState),
+    Key(KeyCode, Press),
+    Scroll(f32),
 }
 
-/// A key by name: a letter, a digit, or `esc`.
+/// What a key step does with the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Press {
+    Tap,
+    Hold,
+    Release,
+}
+
+/// A key by name: a letter, a digit, `esc`, `space`, `ctrl` or `shift`.
 fn key_code(name: &str) -> Option<KeyCode> {
-    let upper = name.to_ascii_uppercase();
-    let code = match upper.as_str() {
-        "ESC" => KeyCode::Escape,
-        "A" => KeyCode::KeyA,
-        "B" => KeyCode::KeyB,
-        "C" => KeyCode::KeyC,
-        "R" => KeyCode::KeyR,
-        "T" => KeyCode::KeyT,
-        "1" => KeyCode::Digit1,
-        "2" => KeyCode::Digit2,
-        "3" => KeyCode::Digit3,
-        _ => return None,
+    const LETTERS: [KeyCode; 26] = [
+        KeyCode::KeyA,
+        KeyCode::KeyB,
+        KeyCode::KeyC,
+        KeyCode::KeyD,
+        KeyCode::KeyE,
+        KeyCode::KeyF,
+        KeyCode::KeyG,
+        KeyCode::KeyH,
+        KeyCode::KeyI,
+        KeyCode::KeyJ,
+        KeyCode::KeyK,
+        KeyCode::KeyL,
+        KeyCode::KeyM,
+        KeyCode::KeyN,
+        KeyCode::KeyO,
+        KeyCode::KeyP,
+        KeyCode::KeyQ,
+        KeyCode::KeyR,
+        KeyCode::KeyS,
+        KeyCode::KeyT,
+        KeyCode::KeyU,
+        KeyCode::KeyV,
+        KeyCode::KeyW,
+        KeyCode::KeyX,
+        KeyCode::KeyY,
+        KeyCode::KeyZ,
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ];
+    let name = name.to_ascii_lowercase();
+    let code = match name.as_str() {
+        "esc" => KeyCode::Escape,
+        "space" => KeyCode::Space,
+        "ctrl" => KeyCode::ControlLeft,
+        "shift" => KeyCode::ShiftLeft,
+        _ => match *name.as_bytes() {
+            [letter @ b'a'..=b'z'] => LETTERS[(letter - b'a') as usize],
+            [digit @ b'0'..=b'9'] => DIGITS[(digit - b'0') as usize],
+            _ => return None,
+        },
     };
     Some(code)
 }
@@ -286,18 +227,27 @@ fn parse_script(script: &str) -> Result<Vec<(f32, Step)>, String> {
                     .and_then(|word| word.parse().ok())
                     .ok_or_else(|| format!("expected a number in {line:?}"))
             };
+            let button = || match words.get(2).copied() {
+                None | Some("left") => Ok(MouseButton::Left),
+                Some("right") => Ok(MouseButton::Right),
+                Some("middle") => Ok(MouseButton::Middle),
+                Some(other) => Err(format!("unknown mouse button {other:?} in {line:?}")),
+            };
+            let key = |press| {
+                words
+                    .get(2)
+                    .and_then(|name| key_code(name))
+                    .map(|code| Step::Key(code, press))
+                    .ok_or_else(|| format!("unknown key in {line:?}"))
+            };
             let step = match words.get(1).copied() {
                 Some("move") => Step::Move(Vec2::new(number(2)?, number(3)?)),
-                Some("down") => Step::Down,
-                Some("up") => Step::Up,
-                Some("shift") => Step::Shift(true),
-                Some("unshift") => Step::Shift(false),
-                Some("key") => Step::Key(
-                    words
-                        .get(2)
-                        .and_then(|name| key_code(name))
-                        .ok_or_else(|| format!("unknown key in {line:?}"))?,
-                ),
+                Some("down") => Step::Button(button()?, ButtonState::Pressed),
+                Some("up") => Step::Button(button()?, ButtonState::Released),
+                Some("key") => key(Press::Tap)?,
+                Some("hold") => key(Press::Hold)?,
+                Some("release") => key(Press::Release)?,
+                Some("scroll") => Step::Scroll(number(2)?),
                 _ => return Err(format!("unknown step {line:?}")),
             };
             Ok((number(0)?, step))
@@ -313,18 +263,13 @@ fn run_input_script(
     mut window_events: MessageWriter<WindowEvent>,
     mut buttons: MessageWriter<MouseButtonInput>,
     mut keyboard: MessageWriter<KeyboardInput>,
-    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut wheel: MessageWriter<MouseWheel>,
 ) {
     let window = *window;
     while let Some(&(at, step)) = script.steps.get(script.next)
         && time.elapsed_secs() >= at
     {
         script.next += 1;
-        let button = |state| MouseButtonInput {
-            button: MouseButton::Left,
-            state,
-            window,
-        };
         match step {
             Step::Move(position) => {
                 commands.insert_resource(ScriptedCursor(position));
@@ -334,20 +279,23 @@ fn run_input_script(
                     delta: None,
                 }));
             }
-            Step::Down | Step::Up => {
-                let state = if step == Step::Down {
-                    ButtonState::Pressed
-                } else {
-                    ButtonState::Released
+            Step::Button(button, state) => {
+                let input = MouseButtonInput {
+                    button,
+                    state,
+                    window,
                 };
-                buttons.write(button(state));
-                window_events.write(WindowEvent::MouseButtonInput(button(state)));
+                buttons.write(input);
+                window_events.write(WindowEvent::MouseButtonInput(input));
             }
-            Step::Shift(true) => keys.press(KeyCode::ShiftLeft),
-            Step::Shift(false) => keys.release(KeyCode::ShiftLeft),
-            Step::Key(key_code) => {
-                // Pressed and released within the frame: it still counts as just pressed.
-                for state in [ButtonState::Pressed, ButtonState::Released] {
+            Step::Key(key_code, press) => {
+                let states: &[ButtonState] = match press {
+                    // Pressed and released within the frame: it still counts as just pressed.
+                    Press::Tap => &[ButtonState::Pressed, ButtonState::Released],
+                    Press::Hold => &[ButtonState::Pressed],
+                    Press::Release => &[ButtonState::Released],
+                };
+                for &state in states {
                     keyboard.write(KeyboardInput {
                         key_code,
                         logical_key: Key::Unidentified(NativeKey::Unidentified),
@@ -357,6 +305,15 @@ fn run_input_script(
                         window,
                     });
                 }
+            }
+            Step::Scroll(lines) => {
+                wheel.write(MouseWheel {
+                    unit: MouseScrollUnit::Line,
+                    x: 0.0,
+                    y: lines,
+                    window,
+                    phase: TouchPhase::Moved,
+                });
             }
         }
     }
@@ -368,34 +325,37 @@ mod tests {
 
     #[test]
     fn parses_scripts() {
-        let steps = parse_script("1 move 10 20; 1.5 down ;2 up; 3 shift; 4 key b").unwrap();
+        let steps = parse_script(
+            "1 move 10 20; 1.5 down ;2 up right; 2.5 down middle; 3 hold ctrl; 3.1 key Z; \
+             3.2 release ctrl; 4 scroll -2",
+        )
+        .unwrap();
         assert_eq!(
             steps,
             vec![
                 (1.0, Step::Move(Vec2::new(10.0, 20.0))),
-                (1.5, Step::Down),
-                (2.0, Step::Up),
-                (3.0, Step::Shift(true)),
-                (4.0, Step::Key(KeyCode::KeyB)),
+                (1.5, Step::Button(MouseButton::Left, ButtonState::Pressed)),
+                (2.0, Step::Button(MouseButton::Right, ButtonState::Released)),
+                (2.5, Step::Button(MouseButton::Middle, ButtonState::Pressed)),
+                (3.0, Step::Key(KeyCode::ControlLeft, Press::Hold)),
+                (3.1, Step::Key(KeyCode::KeyZ, Press::Tap)),
+                (3.2, Step::Key(KeyCode::ControlLeft, Press::Release)),
+                (4.0, Step::Scroll(-2.0)),
             ]
         );
         assert!(parse_script("1 jump").is_err());
         assert!(parse_script("x down").is_err());
         assert!(parse_script("1 key f13").is_err());
+        assert!(parse_script("1 down sideways").is_err());
     }
 
     #[test]
-    fn switches_lighting_techniques() {
-        let mut techniques = Techniques::default();
-        apply_lighting(&mut techniques, "-ssao, +taa,,+volumetric").unwrap();
-        assert!(!techniques.ssao);
-        assert!(techniques.taa);
-        assert!(techniques.volumetric);
-        assert!(techniques.contact_shadows, "untouched");
-        apply_lighting(&mut techniques, "-contact").unwrap();
-        assert!(!techniques.contact_shadows);
-        assert!(apply_lighting(&mut techniques, "ssao").is_err());
-        assert!(apply_lighting(&mut techniques, "+raytracing").is_err());
+    fn names_keys() {
+        assert_eq!(key_code("a"), Some(KeyCode::KeyA));
+        assert_eq!(key_code("Z"), Some(KeyCode::KeyZ));
+        assert_eq!(key_code("7"), Some(KeyCode::Digit7));
+        assert_eq!(key_code("esc"), Some(KeyCode::Escape));
+        assert_eq!(key_code("ab"), None);
     }
 
     #[test]

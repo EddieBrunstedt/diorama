@@ -1,11 +1,25 @@
-//! Tiny deterministic random numbers for procedural visuals.
+//! Tiny deterministic random numbers.
 //!
-//! Visuals are seeded from grid coordinates, so the island looks the same every run and a tile's
-//! look doesn't change when its neighbors do.
+//! Cell visuals are seeded from grid coordinates, so the map looks the same every run and a
+//! cell's look doesn't change when its neighbors do. Everything else is seeded from [`RunSeed`].
 
-use bevy::math::IVec2;
+use bevy::{math::IVec2, prelude::Resource};
 
-/// SplitMix64: small, fast and good enough for picking colors and positions.
+/// The seed for this run's randomness. `DIORAMA_SEED` fixes it (see [`crate::dev`]), so scripted
+/// runs repeat; otherwise it comes from the clock.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct RunSeed(pub u64);
+
+impl Default for RunSeed {
+    fn default() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos() as u64);
+        Self(nanos)
+    }
+}
+
+/// SplitMix64: small, fast and good enough for colors, positions and rolls.
 #[derive(Clone, Debug)]
 pub struct Rng(u64);
 
@@ -14,7 +28,7 @@ impl Rng {
         Self(seed ^ 0x9E37_79B9_7F4A_7C15)
     }
 
-    /// A generator for one grid cell. `salt` separates independent uses (e.g. surface vs. trees).
+    /// A generator for one grid cell. `salt` separates independent uses (e.g. color vs. height).
     pub fn for_cell(cell: IVec2, salt: u64) -> Self {
         let packed = ((cell.x as u32 as u64) << 32) | cell.y as u32 as u64;
         Self::new(packed.wrapping_mul(0xD6E8_FEB8_6659_FD93) ^ salt)
@@ -41,10 +55,6 @@ impl Rng {
     /// Uniform integer in `[0, n)`.
     pub fn index(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
-    }
-
-    pub fn chance(&mut self, probability: f32) -> bool {
-        self.f32() < probability
     }
 
     pub fn pick<T: Copy>(&mut self, items: &[T]) -> T {

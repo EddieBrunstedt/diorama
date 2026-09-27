@@ -1,99 +1,92 @@
-//! All gameplay numbers in one place, so they're easy to find and tune.
+//! All tuning numbers in one place: how the game plays, how the camera moves, and how the
+//! feedback feels. The grey-box look (shape sizes, light strength) stays next to the code that
+//! draws it, and colors live in [`crate::palette`].
 //!
-//! Visual-only constants (colors, model sizes, animation timings) live next to the code that uses
-//! them; this file is for numbers that change how the game plays.
+//! Distances are in world units, and one grid cell is one world unit.
 
-/// Trees spawned on each forest tile. Each tree is one chop target.
-pub const TREES_PER_FOREST_TILE: usize = 3;
+/// The map: cells grouped into chunks.
+pub mod grid {
+    /// Cells along one side of a chunk.
+    pub const CHUNK_SIZE: i32 = 16;
+    /// The starting map is this many chunks along each side, centered on the origin.
+    pub const STARTING_CHUNKS: i32 = 2;
+}
 
-/// The keeper's walking speed in tiles per second.
-pub const KEEPER_SPEED: f32 = 1.2;
-/// Wood in the backpack at the start.
-pub const STARTING_WOOD: u32 = 0;
-pub const BACKPACK_CAPACITY: u32 = 5;
+/// The overview camera: steep, looking straight up the map (rows stay level on screen).
+pub mod camera {
+    /// Vertical field of view. Narrow, so there's little perspective distortion.
+    pub const FOV_DEGREES: f32 = 30.0;
+    /// How far the camera looks down (90 is straight down).
+    pub const PITCH_DEGREES: f32 = 62.0;
+    /// Room around the map when the camera frames all of it (1.0 is edge to edge).
+    pub const FRAMING_MARGIN: f32 = 1.12;
+    /// Closest and farthest zoom, as the distance from the camera to the ground point it looks at.
+    pub const MIN_DISTANCE: f32 = 10.0;
+    pub const MAX_DISTANCE: f32 = 90.0;
+    /// How much one scroll notch zooms, as a fraction of the distance.
+    pub const ZOOM_STEP: f32 = 0.14;
+    /// How quickly the camera eases to a new zoom (per second, exponential).
+    pub const ZOOM_EASE_RATE: f32 = 16.0;
+    /// Keyboard pan speed, as a fraction of the camera distance per second, so it feels the same
+    /// at every zoom.
+    pub const PAN_SPEED: f32 = 1.0;
+    /// How far past the map's edge the camera may look.
+    pub const PAN_OVERSCROLL: f32 = 4.0;
+}
 
-/// Seconds to chop down one tree, once the keeper is standing next to it.
-pub const CHOP_SECONDS: f32 = 2.0;
-pub const WOOD_PER_TREE: u32 = 1;
+/// Feedback. Everything here is about feel, none of it changes the rules.
+pub mod juice {
+    /// A structure drops in from this high, taking this long (seconds), accelerating all the way.
+    pub const DROP_HEIGHT: f32 = 7.0;
+    pub const DROP_SECONDS: f32 = 0.13;
+    /// When a drag places several walls in one frame, each one lands this much after the previous
+    /// one, so a fast drag ripples down the line.
+    pub const LINE_STAGGER: f32 = 0.022;
+    /// When many walls change at once (e.g. undoing a long line), the stagger shrinks so the
+    /// whole ripple takes at most this long.
+    pub const MAX_RIPPLE_SECONDS: f32 = 0.3;
+    /// Squash on landing (negative is flatter), and screen shake: trauma per landing, and the
+    /// most that landings alone can build up.
+    pub const LAND_SQUASH: f32 = -0.45;
+    pub const LAND_SHAKE: f32 = 0.22;
+    pub const LAND_SHAKE_MAX: f32 = 0.38;
+    /// Dust kicked up on landing.
+    pub const DUST_COUNT: usize = 16;
+    pub const DUST_SIZE: f32 = 0.2;
+    pub const DUST_SPREAD: f32 = 3.2;
+    pub const DUST_LIFT: f32 = 1.3;
+    pub const DUST_LIFETIME: f32 = 0.6;
+    /// A removed structure pops up and shrinks away, throwing out some rubble.
+    pub const REMOVE_SECONDS: f32 = 0.16;
+    pub const RUBBLE_COUNT: usize = 7;
+    pub const RUBBLE_SIZE: f32 = 0.16;
+    pub const RUBBLE_SPREAD: f32 = 1.8;
+    pub const RUBBLE_LIFT: f32 = 3.2;
+    pub const RUBBLE_LIFETIME: f32 = 0.55;
+    /// A click that can't do anything shakes what's in the way (radians), and the hover highlight
+    /// flashes for this long (seconds).
+    pub const DENIED_WOBBLE: f32 = 0.18;
+    pub const DENIED_FLASH_SECONDS: f32 = 0.25;
+    /// The hover highlight pops (stretch amount) when it moves to another cell.
+    pub const HOVER_POP: f32 = 0.35;
 
-/// Seconds to build a tower, once the keeper is standing next to the site.
-pub const BUILD_SECONDS: f32 = 4.0;
-pub const TOWER_WOOD_COST: u32 = 3;
-/// Seconds to build the catapult, and its cost. The island has room for one.
-pub const CATAPULT_BUILD_SECONDS: f32 = 6.0;
-pub const CATAPULT_WOOD_COST: u32 = 4;
-
-/// Seconds of hammering to repair a tower, however badly it's hurt. Repairs cost no wood.
-pub const REPAIR_SECONDS: f32 = 3.0;
-
-/// Most orders the queue can hold.
-pub const MAX_ORDERS: usize = 12;
-
-/// Length of the prepare phase before each wave, in seconds.
-pub const PREPARE_SECONDS: f32 = 30.0;
-/// Bonus coin per second left on the prepare timer when the bell is rung.
-/// (Coin isn't spent on anything yet; the bonus is only shown.)
-pub const BELL_COINS_PER_SECOND: f32 = 1.0;
-
-/// The hearth's hit points. The run is over when they're gone.
-pub const HEARTH_HP: u32 = 10;
-/// Damage a slime does when it reaches the hearth.
-pub const SLIME_DAMAGE: u32 = 1;
-
-/// Slimes in wave 1, and how many more each later wave brings.
-pub const SLIMES_FIRST_WAVE: u32 = 4;
-pub const SLIMES_PER_WAVE: u32 = 2;
-/// Slime hit points in wave 1, and how many waves it takes for slimes to gain one more.
-pub const SLIME_HP_FIRST_WAVE: u32 = 2;
-pub const WAVES_PER_SLIME_HP: u32 = 2;
-/// Seconds between slimes in wave 1, how much shorter it gets each wave, and the shortest it gets.
-pub const SLIME_INTERVAL_FIRST_WAVE: f32 = 1.5;
-pub const SLIME_INTERVAL_PER_WAVE: f32 = 0.08;
-pub const SLIME_INTERVAL_MIN: f32 = 0.6;
-/// Seconds from the start of a wave until the first slime shows up.
-pub const FIRST_SLIME_DELAY: f32 = 1.2;
-/// Slime speed along the road, in tiles per second (averaged over its hops).
-pub const SLIME_SPEED: f32 = 0.5;
-
-/// How far a tower shoots, in tiles from its middle.
-pub const TOWER_RANGE: f32 = 1.8;
-/// Seconds between a tower's shots.
-pub const TOWER_COOLDOWN: f32 = 0.8;
-pub const TOWER_DAMAGE: u32 = 1;
-/// Arrow speed in tiles per second.
-pub const ARROW_SPEED: f32 = 5.0;
-/// A tower's hit points. At 0 it's broken: it stops shooting until the keeper repairs it.
-/// Damage stays from one wave to the next.
-pub const TOWER_HP: u32 = 6;
-
-/// Slimes spit goo at towers this close to them (tiles from the tower's middle), so towers next
-/// to the road get hurt and towers a tile further back don't.
-pub const SPIT_REACH: f32 = 1.2;
-/// Seconds between a slime's spits, and the damage each one does.
-pub const SPIT_COOLDOWN: f32 = 3.0;
-pub const SPIT_DAMAGE: u32 = 1;
-
-/// Seconds of holding to charge the catapult fully. Letting go below `CATAPULT_MIN_CHARGE`
-/// (a fraction of full) fires nothing.
-pub const CATAPULT_CHARGE_SECONDS: f32 = 1.1;
-pub const CATAPULT_MIN_CHARGE: f32 = 0.2;
-/// Seconds to wind the arm back and load a new boulder after a shot.
-pub const CATAPULT_RELOAD_SECONDS: f32 = 2.4;
-/// How far the catapult throws, in tiles from its middle, and how close it can't reach.
-pub const CATAPULT_RANGE: f32 = 3.6;
-pub const CATAPULT_MIN_RANGE: f32 = 0.9;
-/// Damage and splash radius (tiles) of a shot at the least and at full charge.
-pub const CATAPULT_DAMAGE_MIN: u32 = 1;
-pub const CATAPULT_DAMAGE_MAX: u32 = 4;
-pub const CATAPULT_SPLASH_MIN: f32 = 0.22;
-pub const CATAPULT_SPLASH_MAX: f32 = 0.5;
-/// Boulder flight time: a base plus more per tile thrown.
-pub const BOULDER_FLIGHT_SECONDS: f32 = 0.55;
-pub const BOULDER_FLIGHT_PER_TILE: f32 = 0.1;
-
-/// Tiles offered after each survived wave; the player picks one.
-pub const OFFER_SIZE: usize = 3;
-/// How likely each kind of tile is to be offered, relative to each other.
-pub const OFFER_WEIGHT_FOREST: u32 = 3;
-pub const OFFER_WEIGHT_MEADOW: u32 = 3;
-pub const OFFER_WEIGHT_ROAD: u32 = 2;
+    /// Longest frame step the springs integrate at once, so a hitch can't make them explode.
+    pub const MAX_SPRING_STEP: f32 = 1.0 / 30.0;
+    /// Squash & stretch spring.
+    pub const SQUASH_STIFFNESS: f32 = 320.0;
+    pub const SQUASH_DAMPING: f32 = 13.0;
+    /// Wobble: how fast it dies down, how fast it shakes, and how long it lasts at most.
+    pub const WOBBLE_DECAY: f32 = 6.0;
+    pub const WOBBLE_FREQUENCY: f32 = 32.0;
+    pub const WOBBLE_LIFETIME: f32 = 0.7;
+    /// Particles fall and bounce on the ground.
+    pub const PARTICLE_GRAVITY: f32 = 12.0;
+    /// Trauma lost per second, and the camera offset at full trauma, as a fraction of the camera
+    /// distance (so a shake looks the same at every zoom).
+    pub const SHAKE_DECAY: f32 = 1.8;
+    pub const SHAKE_MAX_OFFSET: f32 = 0.018;
+    /// How fast the game runs during a hit-stop, relative to normal: nearly frozen.
+    pub const HIT_STOP_SPEED: f32 = 0.03;
+    /// Longest hit-stop, however many hits pile up (real seconds).
+    pub const MAX_HIT_STOP: f32 = 0.2;
+}

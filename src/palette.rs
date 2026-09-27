@@ -1,134 +1,37 @@
-//! The game's color palette. Warm late-afternoon light, soft saturated greens, violet-gray stone.
-//!
-//! Keep colors here so the art direction stays consistent across modules.
+//! Grey-box colors: a dark planet surface, pale concrete, and clear signal colors for feedback.
 
-use bevy::color::Color;
+use bevy::prelude::*;
 
-// Sky and atmosphere.
-pub const SKY_TOP: Color = Color::srgb_u8(0x5C, 0x9E, 0xDA);
-pub const SKY_HORIZON: Color = Color::srgb_u8(0xF8, 0xD8, 0xB6);
-pub const FOG: Color = Color::srgb_u8(0xEE, 0xD4, 0xC0);
-pub const SUNLIGHT: Color = Color::srgb_u8(0xFF, 0xE0, 0xBA);
-pub const SKYLIGHT: Color = Color::srgb_u8(0xA8, 0xBF, 0xE6);
-pub const CLOUD: Color = Color::srgb_u8(0xFF, 0xFA, 0xF4);
-pub const CLOUD_SHADE: Color = Color::srgb_u8(0xDC, 0xD8, 0xEE);
-/// Clouds glow a little so they stay white instead of taking on the fog's color.
-pub const CLOUD_GLOW: Color = Color::srgb_u8(0x9E, 0x9A, 0xA0);
+/// The void around the map.
+pub const BACKGROUND: Color = Color::srgb(0.035, 0.04, 0.05);
+/// Bare ground, and the darker gaps between cells that make the grid readable.
+pub const GROUND: Color = Color::srgb(0.22, 0.2, 0.19);
+pub const GROUND_GAP: Color = Color::srgb(0.12, 0.11, 0.11);
+/// The seam along chunk borders, a little lighter than the gaps between cells.
+pub const CHUNK_SEAM: Color = Color::srgb(0.3, 0.27, 0.24);
+/// Alien rock: darker and redder than anything built, so terrain and structures never mix up.
+pub const ROCK: Color = Color::srgb(0.3, 0.19, 0.17);
 
-// Lighting moods (see `mood.rs`). The calm mood uses the sky and light colors above.
-// The wave: a stormy dusk. A low red sun under a violet sky, lit up by fire and lanterns.
-pub const DUSK_SUN: Color = Color::srgb_u8(0xFF, 0x8C, 0x5C);
-pub const DUSK_SKY_TOP: Color = Color::srgb_u8(0x2E, 0x2C, 0x5E);
-pub const DUSK_HORIZON: Color = Color::srgb_u8(0xB4, 0x74, 0x8C);
-pub const DUSK_FOG: Color = Color::srgb_u8(0x6C, 0x62, 0x8C);
-pub const DUSK_SKYLIGHT: Color = Color::srgb_u8(0x6C, 0x84, 0xE8);
-pub const DUSK_CLOUD_GLOW: Color = Color::srgb_u8(0x5A, 0x48, 0x68);
-// The tile offer: the wave is over, a golden evening after the storm.
-pub const GOLDEN_SUN: Color = Color::srgb_u8(0xFF, 0xD6, 0xA8);
-pub const GOLDEN_SKY_TOP: Color = Color::srgb_u8(0x6C, 0x8C, 0xD0);
-pub const GOLDEN_HORIZON: Color = Color::srgb_u8(0xFA, 0xCC, 0xA8);
-pub const GOLDEN_FOG: Color = Color::srgb_u8(0xEC, 0xCC, 0xB8);
-pub const GOLDEN_SKYLIGHT: Color = Color::srgb_u8(0x9C, 0xB0, 0xEC);
-pub const GOLDEN_CLOUD_GLOW: Color = Color::srgb_u8(0xB0, 0x98, 0x90);
-// Game over: the hearth is out and the island goes cold and gray.
-pub const LOST_SUN: Color = Color::srgb_u8(0xA8, 0xB4, 0xD8);
-pub const LOST_SKY_TOP: Color = Color::srgb_u8(0x28, 0x2E, 0x44);
-pub const LOST_HORIZON: Color = Color::srgb_u8(0x6C, 0x70, 0x84);
-pub const LOST_FOG: Color = Color::srgb_u8(0x5C, 0x60, 0x70);
-pub const LOST_SKYLIGHT: Color = Color::srgb_u8(0x90, 0x9C, 0xC0);
-pub const LOST_CLOUD_GLOW: Color = Color::srgb_u8(0x40, 0x44, 0x50);
+pub const CONCRETE: Color = Color::srgb(0.5, 0.5, 0.48);
+/// A band of hazard yellow along the top of walls: built by humans.
+pub const HAZARD: Color = Color::srgb(0.95, 0.72, 0.1);
 
-// Ground.
-pub const MEADOW_GRASS: Color = Color::srgb_u8(0x93, 0xC4, 0x5A);
-pub const MEADOW_TUFT: Color = Color::srgb_u8(0xA2, 0xCE, 0x62);
-pub const FOREST_GRASS: Color = Color::srgb_u8(0x62, 0x98, 0x4A);
-pub const FOREST_MOSS: Color = Color::srgb_u8(0x55, 0x86, 0x44);
-pub const DIRT: Color = Color::srgb_u8(0x8E, 0x5E, 0x3E);
-pub const DIRT_DARK: Color = Color::srgb_u8(0x6C, 0x46, 0x31);
-pub const STONE: Color = Color::srgb_u8(0x8E, 0x86, 0x94);
-pub const STONE_DEEP: Color = Color::srgb_u8(0x55, 0x4C, 0x62);
-pub const ROAD: Color = Color::srgb_u8(0xDC, 0xBA, 0x82);
-pub const PEBBLE: Color = Color::srgb_u8(0xA8, 0xA0, 0x98);
-pub const COBBLE: Color = Color::srgb_u8(0xBB, 0xAF, 0xA2);
-
-// Flora.
-pub const FLOWERS: [Color; 4] = [
-    Color::srgb_u8(0xFF, 0xF4, 0xE0),
-    Color::srgb_u8(0xFF, 0xD3, 0x4E),
-    Color::srgb_u8(0xF5, 0x9B, 0xB5),
-    Color::srgb_u8(0xB8, 0xA4, 0xF0),
+/// Dust kicked up by a landing: lighter than the ground, so it reads against it.
+pub const DUST: [Color; 3] = [
+    Color::srgb(0.62, 0.57, 0.5),
+    Color::srgb(0.72, 0.67, 0.6),
+    Color::srgb(0.52, 0.48, 0.43),
 ];
-pub const MUSHROOM_CAP: Color = Color::srgb_u8(0xD8, 0x47, 0x3A);
-pub const MUSHROOM_STEM: Color = Color::srgb_u8(0xF1, 0xE6, 0xD2);
-pub const BARK: Color = Color::srgb_u8(0x7A, 0x4E, 0x2D);
-pub const LOG_END: Color = Color::srgb_u8(0xD8, 0xB2, 0x7A);
-pub const PINE: Color = Color::srgb_u8(0x3C, 0x7A, 0x52);
-pub const PINE_TIP: Color = Color::srgb_u8(0x5C, 0x9E, 0x5E);
-pub const LEAVES: Color = Color::srgb_u8(0x74, 0xB0, 0x4C);
-pub const LEAVES_AUTUMN: Color = Color::srgb_u8(0xE8, 0x9A, 0x3C);
+pub const RUBBLE: [Color; 2] = [Color::srgb(0.66, 0.65, 0.62), Color::srgb(0.5, 0.49, 0.47)];
 
-// Hearth.
-pub const HEARTH_STONE: Color = Color::srgb_u8(0xA0, 0x97, 0x8E);
-pub const EMBER_BED: Color = Color::srgb(1.0, 0.22, 0.03);
-pub const FLAME_OUTER: Color = Color::srgb(1.0, 0.3, 0.03);
-pub const FLAME_CORE: Color = Color::srgb(1.0, 0.6, 0.08);
-pub const FIRELIGHT: Color = Color::srgb(1.0, 0.62, 0.3);
+/// Hover highlight: a free cell, a cell a click can't build on, and cells being cleared.
+pub const HOVER_OK: Color = Color::srgb(0.45, 0.95, 1.0);
+pub const HOVER_BLOCKED: Color = Color::srgb(1.0, 0.25, 0.2);
+pub const HOVER_REMOVE: Color = Color::srgb(1.0, 0.6, 0.15);
 
-// Lamps that come on at dusk: tower lanterns, arrow tips, burning boulders.
-pub const LANTERN_GLASS: Color = Color::srgb_u8(0xFF, 0xE8, 0xB0);
-pub const LAMP_GLOW: Color = Color::srgb(1.0, 0.55, 0.18);
-pub const LAMPLIGHT: Color = Color::srgb(1.0, 0.7, 0.4);
-/// The light of a boulder landing.
-pub const IMPACT_FLASH: Color = Color::srgb(1.0, 0.8, 0.55);
+/// The sun and the sky's fill light.
+pub const SUN: Color = Color::srgb(1.0, 0.95, 0.88);
+pub const SKYLIGHT: Color = Color::srgb(0.6, 0.7, 0.9);
 
-// The keeper: a little gnome in a red hat and a blue tunic.
-pub const KEEPER_HAT: Color = Color::srgb_u8(0xD2, 0x46, 0x3C);
-pub const KEEPER_TUNIC: Color = Color::srgb_u8(0x4A, 0x7C, 0xC0);
-pub const KEEPER_BELT: Color = Color::srgb_u8(0x5A, 0x3A, 0x28);
-pub const KEEPER_SKIN: Color = Color::srgb_u8(0xF2, 0xC0, 0x98);
-pub const KEEPER_NOSE: Color = Color::srgb_u8(0xE8, 0x96, 0x80);
-pub const KEEPER_BEARD: Color = Color::srgb_u8(0xF6, 0xF0, 0xE6);
-pub const KEEPER_BOOTS: Color = Color::srgb_u8(0x5C, 0x40, 0x32);
-pub const KEEPER_EYES: Color = Color::srgb_u8(0x2A, 0x22, 0x2E);
-pub const BACKPACK: Color = Color::srgb_u8(0xA8, 0x74, 0x48);
-pub const TOOL_METAL: Color = Color::srgb_u8(0xC8, 0xCE, 0xD8);
-pub const TOOL_HANDLE: Color = Color::srgb_u8(0xB8, 0x84, 0x52);
-
-// Towers.
-pub const PLANK: Color = Color::srgb_u8(0xC0, 0x8A, 0x55);
-pub const ROOF: Color = Color::srgb_u8(0x3E, 0x7E, 0xB0);
-pub const ROOF_TOP: Color = Color::srgb_u8(0x5A, 0x9A, 0xC8);
-pub const FLAG: Color = Color::srgb_u8(0xF4, 0xC8, 0x4A);
-pub const BLUEPRINT: Color = Color::srgb_u8(0xC4, 0xE0, 0xFF);
-pub const BLUEPRINT_PROBLEM: Color = Color::srgb_u8(0xFF, 0xB4, 0xA8);
-pub const ROPE: Color = Color::srgb_u8(0xE2, 0xCC, 0x9A);
-pub const BOULDER: Color = Color::srgb_u8(0x9A, 0x92, 0x9E);
-
-// Enemies.
-pub const SLIME: Color = Color::srgb_u8(0xA0, 0x84, 0xE8);
-/// Flags builds that wait for the wave to end: a deeper slime lilac that reads on paper.
-pub const WAVE_HOLD: Color = Color::srgb_u8(0x84, 0x64, 0xD4);
-/// Goo slimes spit at towers: a little greener and glossier than the slimes themselves.
-pub const GOO: Color = Color::srgb_u8(0xB4, 0x9C, 0xF0);
-/// Slimes and their goo glow faintly in the dark.
-pub const SLIME_GLOW: Color = Color::srgb_u8(0x9C, 0x7C, 0xFF);
-
-// The prepare phase and the bell.
-pub const BRASS: Color = Color::srgb_u8(0xE6, 0xA8, 0x3E);
-pub const COIN: Color = Color::srgb_u8(0xFF, 0xD0, 0x48);
-
-// Orders and the route through them.
-pub const ROUTE: Color = Color::srgb_u8(0xFF, 0xF6, 0xE4);
-pub const ORDER_CHOP: Color = Color::srgb_u8(0xE8, 0x9A, 0x3C);
-pub const ORDER_BUILD: Color = Color::srgb_u8(0x6C, 0xB8, 0x5C);
-pub const ORDER_WALK: Color = Color::srgb_u8(0x7C, 0xA8, 0xDC);
-pub const ORDER_REPAIR: Color = Color::srgb_u8(0x3E, 0xA8, 0x9C);
-pub const ORDER_CATAPULT: Color = Color::srgb_u8(0xCC, 0x5C, 0x8E);
-pub const PROBLEM: Color = Color::srgb_u8(0xE0, 0x4A, 0x3E);
-
-// UI.
-pub const UI_PAPER: Color = Color::srgb_u8(0xFF, 0xF4, 0xE0);
-pub const UI_PAPER_DARK: Color = Color::srgb_u8(0xE8, 0xD2, 0xB0);
-pub const UI_INK: Color = Color::srgb_u8(0x4A, 0x36, 0x2C);
-pub const UI_INK_SOFT: Color = Color::srgb_u8(0x8A, 0x70, 0x5E);
-pub const UI_PROBLEM_PAPER: Color = Color::srgb_u8(0xFF, 0xD8, 0xCC);
+/// Controls hint text.
+pub const HINT_TEXT: Color = Color::srgba(0.85, 0.87, 0.9, 0.75);

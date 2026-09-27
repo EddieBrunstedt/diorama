@@ -1,39 +1,19 @@
 //! Small in-house animation helpers: tweens with easing, squash & stretch springs, wobbles,
-//! particles, things flying to where they're counted, screen shake and hit-stop.
+//! particles, screen shake and hit-stop.
 
-use crate::rng::Rng;
-use crate::voxel::{MarkerMaterial, VoxelMaterial, VoxelMesh};
+use crate::rng::{Rng, RunSeed};
+use crate::tuning::juice::*;
 use bevy::{ecs::system::SystemParam, light::NotShadowCaster, prelude::*};
 use std::collections::HashMap;
-
-/// Longest frame step the springs integrate at once, so a hitch can't make them explode.
-const MAX_SPRING_STEP: f32 = 1.0 / 30.0;
-const SQUASH_STIFFNESS: f32 = 280.0;
-const SQUASH_DAMPING: f32 = 11.0;
-const WOBBLE_DECAY: f32 = 6.0;
-const WOBBLE_FREQUENCY: f32 = 28.0;
-const WOBBLE_LIFETIME: f32 = 0.8;
-const PARTICLE_GRAVITY: f32 = 9.0;
-/// Particles bounce on the island's surface.
-const PARTICLE_FLOOR: f32 = 0.0;
-/// Trauma lost per second, and the camera offset (world units) at full trauma.
-const SHAKE_DECAY: f32 = 1.6;
-const SHAKE_MAX_OFFSET: f32 = 0.12;
-/// How fast the game runs during a hit-stop, relative to normal: nearly frozen.
-const HIT_STOP_SPEED: f32 = 0.03;
-/// Longest hit-stop, however many hits pile up (real seconds).
-const MAX_HIT_STOP: f32 = 0.2;
 
 pub struct JuicePlugin;
 
 impl Plugin for JuicePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<VoxelMaterial>()
-            .init_resource::<MarkerMaterial>()
-            .init_resource::<CubeCache>()
+        app.init_resource::<ParticleAssets>()
             .init_resource::<Shake>()
             .init_resource::<HitStop>()
-            .insert_resource(ParticleRng(Rng::new(0x9A27)))
+            .add_systems(Startup, seed_particles)
             .add_systems(
                 Update,
                 (
@@ -41,7 +21,6 @@ impl Plugin for JuicePlugin {
                     run_squash,
                     run_wobbles,
                     run_particles,
-                    run_flights,
                     decay_shake,
                 ),
             )
@@ -55,14 +34,17 @@ pub enum TweenTarget {
     Scale { from: Vec3, to: Vec3 },
 }
 
-/// Animates a transform property once, then removes itself. The entity stays hidden until the
-/// tween starts, so spawn it with `Visibility::Hidden` and [`Tween::start_transform`].
+/// Animates a transform property once, then triggers [`TweenDone`] and removes itself (or
+/// despawns the entity, see [`Tween::then_despawn`]). The entity stays hidden until the tween
+/// starts, so spawn it with `Visibility::Hidden` and [`Tween::start_transform`] when there's a
+/// delay.
 #[derive(Component, Clone, Debug)]
 pub struct Tween {
     pub target: TweenTarget,
     pub ease: EaseFunction,
     pub delay: f32,
     pub duration: f32,
+    despawn: bool,
     elapsed: f32,
 }
 
@@ -73,36 +55,15 @@ impl Tween {
             ease,
             delay,
             duration,
+            despawn: false,
             elapsed: 0.0,
         }
     }
 
-    /// Falls from `height` above `rest` and bounces into place.
-    pub fn drop_in(rest: Vec3, height: f32, delay: f32) -> Self {
-        let from = rest + Vec3::Y * height;
-        Self::new(
-            TweenTarget::Translation { from, to: rest },
-            EaseFunction::BounceOut,
-            delay,
-            0.75,
-        )
-    }
-
-    /// Grows from nothing to `scale` with a little overshoot.
-    pub fn pop_in(scale: Vec3, delay: f32) -> Self {
-        // Not exactly zero: a zero scale makes the transform non-invertible.
-        let from = Vec3::splat(0.01);
-        Self::new(
-            TweenTarget::Scale { from, to: scale },
-            EaseFunction::BackOut,
-            delay,
-            0.4,
-        )
-    }
-
-    /// Seconds until the tween has finished.
-    pub fn remaining(&self) -> f32 {
-        (self.delay + self.duration - self.elapsed).max(0.0)
+    /// Despawns the entity when the tween is done, e.g. for something shrinking away.
+    pub fn then_despawn(mut self) -> Self {
+        self.despawn = true;
+        self
     }
 
     /// The transform the entity should be spawned with (the tween's first frame).
@@ -112,6 +73,12 @@ impl Tween {
             TweenTarget::Scale { from, .. } => Transform::from_scale(from),
         }
     }
+}
+
+/// A [`Tween`] finished (the entity may be despawned right after).
+#[derive(EntityEvent, Clone, Copy, Debug)]
+pub struct TweenDone {
+    pub entity: Entity,
 }
 
 fn run_tweens(
@@ -132,7 +99,12 @@ fn run_tweens(
             TweenTarget::Scale { from, to } => transform.scale = from.lerp(to, k),
         }
         if t >= 1.0 {
-            commands.entity(entity).remove::<Tween>();
+            commands.trigger(TweenDone { entity });
+            if tween.despawn {
+                commands.entity(entity).despawn();
+            } else {
+                commands.entity(entity).remove::<Tween>();
+            }
         }
     }
 }
@@ -186,7 +158,7 @@ fn run_squash(time: Res<Time>, mut springs: Query<(&mut Squash, &mut Transform)>
     }
 }
 
-/// A decaying rotational shake, e.g. a tree being hit. Removes itself when done.
+/// A decaying rotational shake, e.g. something that refuses a click. Removes itself when done.
 #[derive(Component, Clone, Debug)]
 pub struct Wobble {
     /// The rotation to shake around and return to.
@@ -233,14 +205,33 @@ fn run_wobbles(
     }
 }
 
-/// Shared vertex-colored unit cubes, one per color, for particles and small props.
-#[derive(Resource, Default)]
-pub struct CubeCache(HashMap<[u8; 4], Handle<Mesh>>);
+/// One shared unit cube for all particles, and one material per color.
+#[derive(Resource)]
+struct ParticleAssets {
+    cube: Handle<Mesh>,
+    materials: HashMap<[u8; 4], Handle<StandardMaterial>>,
+}
+
+impl FromWorld for ParticleAssets {
+    fn from_world(world: &mut World) -> Self {
+        let cube = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::from_length(1.0));
+        Self {
+            cube,
+            materials: HashMap::new(),
+        }
+    }
+}
 
 #[derive(Resource)]
-pub struct ParticleRng(pub Rng);
+struct ParticleRng(Rng);
 
-/// A voxel chunk flying out of something, bouncing and shrinking away.
+fn seed_particles(mut commands: Commands, seed: Res<RunSeed>) {
+    commands.insert_resource(ParticleRng(Rng::new(seed.0 ^ 0x9A27)));
+}
+
+/// A chunk flying out of something, bouncing on the ground and shrinking away.
 #[derive(Component, Clone, Debug)]
 pub struct Particle {
     velocity: Vec3,
@@ -255,7 +246,7 @@ pub struct Particle {
 pub struct Burst<'a> {
     pub colors: &'a [Color],
     pub count: usize,
-    /// Size of each chunk in world units.
+    /// Size of each chunk.
     pub size: f32,
     /// Horizontal speed.
     pub spread: f32,
@@ -264,71 +255,49 @@ pub struct Burst<'a> {
     pub lifetime: f32,
 }
 
-/// Spawns particles and other small voxel bits.
+/// Spawns particles.
 #[derive(SystemParam)]
 pub struct Particles<'w> {
-    meshes: ResMut<'w, Assets<Mesh>>,
-    cache: ResMut<'w, CubeCache>,
-    material: Res<'w, VoxelMaterial>,
-    marker: Res<'w, MarkerMaterial>,
+    assets: ResMut<'w, ParticleAssets>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
     rng: ResMut<'w, ParticleRng>,
 }
 
 impl Particles<'_> {
-    /// The mesh assets, for systems that spawn other meshes alongside particles.
-    pub fn meshes(&mut self) -> &mut Assets<Mesh> {
-        &mut self.meshes
-    }
-
-    /// A unit cube in `color` using the shared voxel material.
-    pub fn cube(&mut self, color: Color) -> (Mesh3d, MeshMaterial3d<StandardMaterial>) {
-        (
-            Mesh3d(self.cube_mesh(color)),
-            MeshMaterial3d(self.material.0.clone()),
-        )
-    }
-
-    /// A unit cube in `color` that ignores the lighting, for markers (see [`MarkerMaterial`]).
-    pub fn marker(&mut self, color: Color) -> (Mesh3d, MeshMaterial3d<StandardMaterial>) {
-        (
-            Mesh3d(self.cube_mesh(color)),
-            MeshMaterial3d(self.marker.0.clone()),
-        )
-    }
-
-    fn cube_mesh(&mut self, color: Color) -> Handle<Mesh> {
+    fn material(&mut self, color: Color) -> Handle<StandardMaterial> {
         let key = color.to_srgba().to_u8_array();
-        let meshes = &mut self.meshes;
-        self.cache
-            .0
+        let materials = &mut self.materials;
+        self.assets
+            .materials
             .entry(key)
             .or_insert_with(|| {
-                let mut mesh = VoxelMesh::default();
-                // Voxel units: 10 voxels make one world unit.
-                mesh.cuboid(Vec3::splat(-5.0), Vec3::splat(5.0), color);
-                meshes.add(mesh.build())
+                materials.add(StandardMaterial {
+                    base_color: color,
+                    perceptual_roughness: 0.95,
+                    ..default()
+                })
             })
             .clone()
     }
 
-    pub fn burst(&mut self, commands: &mut Commands, at: Vec3, burst: Burst) {
+    /// Particles flying out from `at`, starting spread around it by up to `radius`.
+    pub fn burst(&mut self, commands: &mut Commands, at: Vec3, radius: f32, burst: Burst) {
         for _ in 0..burst.count {
             let rng = &mut self.rng.0;
             let angle = rng.range(0.0, std::f32::consts::TAU);
+            let out = Vec3::new(angle.cos(), 0.0, angle.sin());
             let speed = burst.spread * rng.range(0.4, 1.0);
-            let velocity = Vec3::new(
-                angle.cos() * speed,
-                burst.lift * rng.range(0.6, 1.2),
-                angle.sin() * speed,
-            );
+            let velocity = out * speed + Vec3::Y * burst.lift * rng.range(0.6, 1.2);
             let spin = Vec3::new(
                 rng.range(-9.0, 9.0),
                 rng.range(-9.0, 9.0),
                 rng.range(-9.0, 9.0),
             );
+            let start = at + out * radius * rng.range(0.5, 1.0);
             let size = burst.size * rng.range(0.7, 1.2);
             let lifetime = burst.lifetime * rng.range(0.7, 1.2);
             let color = rng.pick(burst.colors);
+            let material = self.material(color);
             commands.spawn((
                 Particle {
                     velocity,
@@ -337,8 +306,9 @@ impl Particles<'_> {
                     lifetime,
                     size,
                 },
-                self.cube(color),
-                Transform::from_translation(at).with_scale(Vec3::splat(size)),
+                Mesh3d(self.assets.cube.clone()),
+                MeshMaterial3d(material),
+                Transform::from_translation(start).with_scale(Vec3::splat(size)),
                 NotShadowCaster,
             ));
         }
@@ -360,7 +330,7 @@ fn run_particles(
         }
         particle.velocity.y -= PARTICLE_GRAVITY * dt;
         transform.translation += particle.velocity * dt;
-        let bottom = PARTICLE_FLOOR + particle.size / 2.0;
+        let bottom = particle.size / 2.0;
         if transform.translation.y < bottom && particle.velocity.y < 0.0 {
             transform.translation.y = bottom;
             particle.velocity.y *= -0.35;
@@ -377,77 +347,6 @@ fn run_particles(
     }
 }
 
-/// Where a [`Flight`] goes.
-#[derive(Clone, Copy, Debug)]
-pub enum FlightTarget {
-    Point(Vec3),
-    /// Follows a (possibly moving) entity, at an offset in its local space.
-    Entity(Entity, Vec3),
-}
-
-/// Flies an entity in an arc to a target, then triggers [`Landed`] and despawns it.
-#[derive(Component, Clone, Debug)]
-pub struct Flight {
-    from: Vec3,
-    to: FlightTarget,
-    height: f32,
-    duration: f32,
-    age: f32,
-    spin: f32,
-}
-
-impl Flight {
-    pub fn new(from: Vec3, to: FlightTarget, height: f32, duration: f32) -> Self {
-        Self {
-            from,
-            to,
-            height,
-            duration,
-            age: 0.0,
-            spin: 0.0,
-        }
-    }
-
-    /// Tumbles around the vertical axis while flying, in radians per second.
-    pub fn with_spin(mut self, spin: f32) -> Self {
-        self.spin = spin;
-        self
-    }
-}
-
-/// A [`Flight`] reached its target. The entity is despawned right after.
-#[derive(EntityEvent, Clone, Copy, Debug)]
-pub struct Landed {
-    pub entity: Entity,
-}
-
-fn run_flights(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut flights: Query<(Entity, &mut Flight, &mut Transform)>,
-    targets: Query<&GlobalTransform>,
-) {
-    for (entity, mut flight, mut transform) in &mut flights {
-        flight.age += time.delta_secs();
-        let t = (flight.age / flight.duration).min(1.0);
-        let to = match flight.to {
-            FlightTarget::Point(point) => point,
-            FlightTarget::Entity(target, offset) => match targets.get(target) {
-                Ok(global) => global.transform_point(offset),
-                Err(_) => flight.from,
-            },
-        };
-        let along = EaseFunction::SineInOut.sample_clamped(t);
-        transform.translation =
-            flight.from.lerp(to, along) + Vec3::Y * flight.height * 4.0 * t * (1.0 - t);
-        transform.rotate_y(flight.spin * time.delta_secs());
-        if t >= 1.0 {
-            commands.trigger(Landed { entity });
-            commands.entity(entity).despawn();
-        }
-    }
-}
-
 /// Screen shake. Add trauma for a big moment; it wears off by itself. The camera applies
 /// [`Shake::offset`]. Shaking grows with trauma squared, so small amounts stay subtle.
 #[derive(Resource, Default, Debug)]
@@ -456,13 +355,24 @@ pub struct Shake {
 }
 
 impl Shake {
+    // Nothing is big enough for an uncapped shake yet; big hits arrive with towers (milestone 4).
+    #[allow(dead_code)]
     pub fn add(&mut self, trauma: f32) {
         self.trauma = (self.trauma + trauma).min(1.0);
     }
 
-    /// The camera offset at time `t`, in the camera's right/up plane (world units).
+    /// Adds trauma, but only up to `cap`, so many small bumps in a row (e.g. a long line of
+    /// walls landing) don't add up to a big shake.
+    pub fn add_capped(&mut self, trauma: f32, cap: f32) {
+        if self.trauma < cap {
+            self.trauma = (self.trauma + trauma).min(cap);
+        }
+    }
+
+    /// The camera offset at time `t`, in the camera's right/up plane, as a fraction of
+    /// [`SHAKE_MAX_OFFSET`] (each axis within -1..1).
     pub fn offset(&self, t: f32) -> Vec2 {
-        let strength = self.trauma * self.trauma * SHAKE_MAX_OFFSET;
+        let strength = self.trauma * self.trauma;
         // Out-of-phase sines: shaky, but smooth enough not to look like a glitch.
         let x = (t * 47.0).sin() * 0.6 + (t * 83.0 + 1.3).sin() * 0.4;
         let y = (t * 53.0 + 2.1).sin() * 0.6 + (t * 71.0 + 0.4).sin() * 0.4;
@@ -488,6 +398,8 @@ pub struct HitStop {
 
 impl HitStop {
     /// Freezes the game for `seconds` (real time), on top of any freeze still going.
+    // Nothing hits hard enough yet; big hits arrive with towers (milestone 4).
+    #[allow(dead_code)]
     pub fn add(&mut self, seconds: f32) {
         self.left = (self.left + seconds).min(MAX_HIT_STOP);
     }
@@ -500,5 +412,23 @@ fn run_hit_stop(real: Res<Time<Real>>, mut stop: ResMut<HitStop>, mut time: ResM
         stop.left -= real.delta_secs();
     } else if let Some(speed) = stop.speed.take() {
         time.set_relative_speed(speed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_shake_stops_adding_up() {
+        let mut shake = Shake::default();
+        for _ in 0..10 {
+            shake.add_capped(0.2, 0.5);
+        }
+        assert_eq!(shake.trauma, 0.5);
+        shake.add(0.9);
+        assert_eq!(shake.trauma, 1.0);
+        shake.add_capped(0.2, 0.5);
+        assert_eq!(shake.trauma, 1.0, "a cap never lowers the trauma");
     }
 }
