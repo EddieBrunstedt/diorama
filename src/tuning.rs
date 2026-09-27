@@ -171,6 +171,16 @@ pub mod flow {
     pub const WEAR_REBUILD_INTERVAL: f32 = 0.25;
 }
 
+/// Terrain: how it slows the horde. The flow fields cost a cell as the time it takes to cross
+/// (1 / speed), so the horde takes the quickest way, and only wades into mud when going around
+/// takes longer.
+pub mod terrain {
+    /// Speed on mud, as a fraction of the speed on open ground. Swarmers bog down (and bunch up);
+    /// brutes wade through.
+    pub const SWARMER_MUD_SPEED: f32 = 0.5;
+    pub const BRUTE_MUD_SPEED: f32 = 0.75;
+}
+
 /// The horde: swarmers pouring out of the nests toward the Command Center.
 pub mod horde {
     /// Top speed in cells per second, and how much it varies from swarmer to swarmer (a
@@ -328,6 +338,14 @@ pub mod juice {
     /// A brute rocks from side to side as it walks (radians), a full rock every this many cells.
     pub const BRUTE_ROCK: f32 = 0.06;
     pub const BRUTE_STRIDE: f32 = 1.2;
+    /// In mud, swarmers and brutes sink this deep, and every step a brute takes flings up mud.
+    pub const SWARMER_MUD_SINK: f32 = 0.05;
+    pub const BRUTE_MUD_SINK: f32 = 0.12;
+    pub const MUD_SPLASH_COUNT: usize = 6;
+    pub const MUD_SPLASH_SIZE: f32 = 0.1;
+    pub const MUD_SPLASH_SPREAD: f32 = 1.8;
+    pub const MUD_SPLASH_LIFT: f32 = 3.0;
+    pub const MUD_SPLASH_LIFETIME: f32 = 0.5;
     /// A wall that's hit shudders (radians) and chips off a few concrete flecks. Only so many
     /// walls chip a frame, however many are hit.
     pub const WALL_HIT_WOBBLE: f32 = 0.035;

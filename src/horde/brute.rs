@@ -9,15 +9,17 @@ use super::crowd::{CrowdIndex, push_out, separation, steer, touches, walls_in_th
 use super::{Health, HordeRng, MAX_STEP, SwarmersEmerged, Toughness, facing};
 use crate::command_center::CommandCenterHit;
 use crate::flow::{Class, FlowFields};
-use crate::juice::{Shake, Squash};
+use crate::juice::{Burst, Particles, Shake, Squash};
 use crate::map::Landmarks;
 use crate::palette;
 use crate::shapes::{BoxMesh, ShapeMaterial, shade};
 use crate::tuning::horde::*;
 use crate::tuning::juice::{
-    BRUTE_ROCK, BRUTE_STRIDE, EMERGE_DEPTH, EMERGE_SECONDS, SMASH_DIP, SMASH_REAR,
-    SMASH_REAR_SECONDS, SMASH_SECONDS, SMASH_SHAKE, SMASH_SHAKE_MAX, SMASH_SQUASH,
+    BRUTE_MUD_SINK, BRUTE_ROCK, BRUTE_STRIDE, EMERGE_DEPTH, EMERGE_SECONDS, MUD_SPLASH_COUNT,
+    MUD_SPLASH_LIFETIME, MUD_SPLASH_LIFT, MUD_SPLASH_SIZE, MUD_SPLASH_SPREAD, SMASH_DIP,
+    SMASH_REAR, SMASH_REAR_SECONDS, SMASH_SECONDS, SMASH_SHAKE, SMASH_SHAKE_MAX, SMASH_SQUASH,
 };
+use crate::tuning::terrain::BRUTE_MUD_SPEED;
 use crate::wear::StructureHit;
 use bevy::prelude::*;
 
@@ -30,7 +32,8 @@ impl Plugin for BrutePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BruteQueue>()
             .init_resource::<BruteAssets>()
-            .init_resource::<BruteCrowd>();
+            .init_resource::<BruteCrowd>()
+            .add_systems(Update, splash_mud.after(super::HordeSystems));
     }
 }
 
@@ -60,8 +63,9 @@ pub struct Brute {
     speed: f32,
     /// Which way to go when another brute sits exactly on top of this one.
     fallback: Vec2,
-    /// Walk cycle, advanced by the distance walked.
+    /// Walk cycle, advanced by the distance walked, and the steps taken so far.
     stride: f32,
+    steps: u32,
     /// Seconds since it came out of the nest.
     age: f32,
     /// Seconds until it can smash again, and what's left of its last smash's slam.
@@ -224,6 +228,7 @@ pub(super) fn spawn_brutes(
             speed: BRUTE_SPEED * (1.0 + rng.range(-SPEED_VARIATION, SPEED_VARIATION)),
             fallback,
             stride: 0.0,
+            steps: 0,
             age: 0.0,
             smash_cooldown: 0.0,
             slam: 0.0,
@@ -264,9 +269,10 @@ pub(super) fn move_brutes(
     for (entity, mut brute, mut transform, mut squash) in &mut brutes {
         let at = transform.translation.xz();
         let heading = field.direction_at(at);
+        let pace = field.speed_at(at);
         let velocity = steer(
             brute.velocity,
-            heading * brute.speed,
+            heading * brute.speed * pace,
             BRUTE_STEERING_RATE,
             dt,
         );
@@ -340,7 +346,10 @@ pub(super) fn move_brutes(
             (1.0 - brute.smash_cooldown / SMASH_REAR_SECONDS).max(0.0) * SMASH_REAR
         };
         let dip = brute.slam / SMASH_SECONDS * SMASH_DIP;
-        transform.translation = Vec3::new(next.x, -EMERGE_DEPTH * (1.0 - emerged), next.y);
+        // Sinks into mud as it wades in, deeper the more of it is under it.
+        let sink = BRUTE_MUD_SINK * ((1.0 - pace) / (1.0 - BRUTE_MUD_SPEED)).clamp(0.0, 1.0);
+        let y = -sink - EMERGE_DEPTH * (1.0 - emerged);
+        transform.translation = Vec3::new(next.x, y, next.y);
         transform.rotation =
             facing(brute.heading) * Quat::from_rotation_x(rear - dip) * Quat::from_rotation_z(rock);
     }
@@ -351,6 +360,43 @@ pub(super) fn move_brutes(
             .iter()
             .map(|(entity, _, transform, _)| (transform.translation.xz(), entity)),
     );
+}
+
+/// Every step a brute takes in mud flings up a splash by the foot that came down.
+fn splash_mud(
+    mut commands: Commands,
+    fields: Res<FlowFields>,
+    mut brutes: Query<(&mut Brute, &Transform)>,
+    mut particles: Particles,
+) {
+    for (mut brute, transform) in &mut brutes {
+        // Two steps to a full rock from side to side.
+        let steps = (brute.stride / (BRUTE_STRIDE / 2.0)) as u32;
+        if steps == brute.steps {
+            continue;
+        }
+        brute.steps = steps;
+        let at = transform.translation.xz();
+        if fields.brute.speed_at(at) >= 1.0 {
+            continue;
+        }
+        let side = if steps.is_multiple_of(2) { 1.0 } else { -1.0 };
+        // Out at its side, so the splash isn't hidden under it.
+        let foot = at + brute.heading.perp() * side * BRUTE_RADIUS;
+        particles.burst(
+            &mut commands,
+            Vec3::new(foot.x, 0.05, foot.y),
+            0.15,
+            Burst {
+                colors: &palette::MUD_SPLASH,
+                count: MUD_SPLASH_COUNT,
+                size: MUD_SPLASH_SIZE,
+                spread: MUD_SPLASH_SPREAD,
+                lift: MUD_SPLASH_LIFT,
+                lifetime: MUD_SPLASH_LIFETIME,
+            },
+        );
+    }
 }
 
 pub(super) fn reach_command_center(

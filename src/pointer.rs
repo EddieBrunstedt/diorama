@@ -4,7 +4,7 @@
 
 use crate::camera::{CameraRig, MainCamera};
 use crate::dev::ScriptedCursor;
-use crate::grid::{Grid, Structure, Terrain, cell_at};
+use crate::grid::{Grid, Structure, cell_at};
 use crate::map::terrain_height;
 use crate::structures::structure_height;
 use bevy::{prelude::*, window::PrimaryWindow};
@@ -52,15 +52,15 @@ pub fn cursor_position(window: &Window, scripted: Option<&ScriptedCursor>) -> Op
 }
 
 /// How high the top of a cell's column is: its terrain, plus the structure standing on it.
-pub fn cell_top(cell: IVec2, terrain: Terrain, structure: Option<Structure>) -> f32 {
-    terrain_height(cell, terrain) + structure.map_or(0.0, structure_height)
+pub fn cell_top(grid: &Grid, cell: IVec2, structure: Option<Structure>) -> f32 {
+    terrain_height(grid, cell) + structure.map_or(0.0, structure_height)
 }
 
 /// How high the top of what stands on a cell is (0 outside the map).
 pub fn column_top(grid: &Grid, cell: IVec2) -> f32 {
     let top = grid
         .cell(cell)
-        .map_or(0.0, |data| cell_top(cell, data.terrain, data.structure));
+        .map_or(0.0, |data| cell_top(grid, cell, data.structure));
     debug_assert!(
         top <= CEILING,
         "column at {cell} is above the picking ceiling"

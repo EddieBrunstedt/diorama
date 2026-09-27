@@ -11,6 +11,12 @@ pub const GROUND_GAP: Color = Color::srgb(0.12, 0.11, 0.11);
 pub const CHUNK_SEAM: Color = Color::srgb(0.3, 0.27, 0.24);
 /// Alien rock: darker and redder than anything built, so terrain and structures never mix up.
 pub const ROCK: Color = Color::srgb(0.3, 0.19, 0.17);
+/// Mud: darker and greener than the ground, drawn glossy, with a lip of drier mud around a patch,
+/// black puddles in it, and droplets flung up by brutes wading through.
+pub const MUD: Color = Color::srgb(0.12, 0.12, 0.07);
+pub const MUD_LIP: Color = Color::srgb(0.2, 0.18, 0.11);
+pub const MUD_PUDDLE: Color = Color::srgb(0.05, 0.055, 0.035);
+pub const MUD_SPLASH: [Color; 2] = [Color::srgb(0.34, 0.31, 0.19), Color::srgb(0.26, 0.24, 0.14)];
 
 pub const CONCRETE: Color = Color::srgb(0.5, 0.5, 0.48);
 /// A band of hazard yellow along the top of walls: built by humans.

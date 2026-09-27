@@ -19,20 +19,23 @@ pub enum Terrain {
     Rock,
     /// Where the horde comes out. The horde walks over it, but nothing can be built on it.
     Nest,
+    /// Slows the horde down (see [`crate::flow::Class::speed_on`]), and nothing can be built on
+    /// it: a gap full of mud can't be walled shut.
+    Mud,
 }
 
 impl Terrain {
     pub fn buildable(self) -> bool {
         match self {
             Terrain::Ground => true,
-            Terrain::Rock | Terrain::Nest => false,
+            Terrain::Rock | Terrain::Nest | Terrain::Mud => false,
         }
     }
 
     /// Whether ground enemies can walk over it (structures on it aside).
     pub fn walkable(self) -> bool {
         match self {
-            Terrain::Ground | Terrain::Nest => true,
+            Terrain::Ground | Terrain::Nest | Terrain::Mud => true,
             Terrain::Rock => false,
         }
     }
@@ -593,6 +596,10 @@ mod tests {
             Err(Blocked::Occupied(Structure::WALL))
         );
         assert_eq!(grid.check_build(rock), Err(Blocked::Terrain(Terrain::Rock)));
+        let mud = IVec2::new(-6, -6);
+        grid.set_terrain(mud, Terrain::Mud);
+        assert_eq!(grid.check_build(mud), Err(Blocked::Terrain(Terrain::Mud)));
+        assert!(Terrain::Mud.walkable());
         assert_eq!(
             grid.check_build(IVec2::new(999, 0)),
             Err(Blocked::OutsideMap)

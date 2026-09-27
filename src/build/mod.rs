@@ -168,8 +168,8 @@ fn strokes(
         // end toward the camera, and walls it removes don't let the end slip past them.
         let mut stroke = stroke;
         let end = pointer.pick(|cell| {
-            grid.cell(cell).map_or(0.0, |data| {
-                cell_top(cell, data.terrain, stroke.structure_before(&grid, cell))
+            grid.cell(cell).map_or(0.0, |_| {
+                cell_top(&grid, cell, stroke.structure_before(&grid, cell))
             })
         });
         if let Some(cell) = end {

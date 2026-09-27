@@ -29,6 +29,7 @@ use crate::shapes::{BoxMesh, ShapeMaterial, shade};
 use crate::tuning::horde::*;
 use crate::tuning::juice::{
     BITE_LUNGE, BITE_SECONDS, EMERGE_DEPTH, EMERGE_SECONDS, SCUTTLE_HOP, SCUTTLE_STRIDE,
+    SWARMER_MUD_SINK,
 };
 use crate::waves::{CurrentWave, Phase};
 use crate::wear::StructureHit;
@@ -389,7 +390,8 @@ fn move_swarmers(
         .for_each(|(entity, mut swarmer, mut transform)| {
             let at = transform.translation.xz();
             let heading = field.direction_at(at);
-            let desired = heading * swarmer.speed;
+            let pace = field.speed_at(at);
+            let desired = heading * swarmer.speed * pace;
             let velocity = steer(swarmer.velocity, desired, STEERING_RATE, dt);
             let mut push = separation(
                 index,
@@ -453,7 +455,9 @@ fn move_swarmers(
             swarmer.age += dt;
             let emerged = (swarmer.age / EMERGE_SECONDS).min(1.0);
             let hop = swarmer.stride.sin().abs() * SCUTTLE_HOP;
-            transform.translation = Vec3::new(next.x, hop - EMERGE_DEPTH * (1.0 - emerged), next.y);
+            let sink = if pace < 1.0 { SWARMER_MUD_SINK } else { 0.0 };
+            let y = hop - sink - EMERGE_DEPTH * (1.0 - emerged);
+            transform.translation = Vec3::new(next.x, y, next.y);
             transform.scale = Vec3::splat(emerged);
             let look = match wall {
                 Some(cell) => Some(facing(cell.as_vec2() + 0.5 - next)),

@@ -9,7 +9,8 @@
 //! without a wall or rock in it, so brutes can't squeeze through: they break a wall beside it.
 //!
 //! Walls and towers are passable at a cost based on the HP they have left: when a maze makes the
-//! detour longer than chewing through, the field leads through them.
+//! detour longer than chewing through, the field leads through them. Terrain costs the time it
+//! takes to cross: mud slows the horde down, so it costs more than open ground, by class.
 //!
 //! Distances come from Dijkstra's algorithm from the targets outward, but each node's distance is
 //! solved from its neighbors as a wavefront (the fast marching method) rather than summed along
@@ -20,10 +21,11 @@
 //! date.
 
 use crate::build::{BuildSystems, StructureChanged};
-use crate::grid::{Cell, Grid, Structure};
+use crate::grid::{Cell, Grid, Structure, Terrain};
 use crate::map::Landmarks;
 use crate::tuning::flow::{BRUTE_COST_PER_HP, SWARMER_COST_PER_HP, WEAR_REBUILD_INTERVAL};
 use crate::tuning::horde::BRUTE_RADIUS;
+use crate::tuning::terrain::{BRUTE_MUD_SPEED, SWARMER_MUD_SPEED};
 use crate::wear::StructureDamaged;
 use bevy::prelude::*;
 use std::cmp::Reverse;
@@ -100,17 +102,37 @@ impl Class {
         };
         1.0 + hp as f32 * per_hp
     }
+
+    /// How fast the class moves over `terrain`, as a fraction of its speed on open ground (0
+    /// where it can't walk).
+    pub fn speed_on(self, terrain: Terrain) -> f32 {
+        match terrain {
+            Terrain::Ground | Terrain::Nest => 1.0,
+            Terrain::Mud => match self {
+                Class::Swarmer => SWARMER_MUD_SPEED,
+                Class::Brute => BRUTE_MUD_SPEED,
+            },
+            Terrain::Rock => 0.0,
+        }
+    }
+
+    /// What it costs to cross `terrain`, in cells of open ground: the time it takes (infinite if
+    /// the class can't walk on it).
+    pub fn terrain_cost(self, terrain: Terrain) -> f32 {
+        if terrain.walkable() {
+            1.0 / self.speed_on(terrain)
+        } else {
+            f32::INFINITY
+        }
+    }
 }
 
-/// What it costs `class` to walk through a cell, in cells of open ground. Infinite if it can't be
-/// walked through at all.
-pub fn cell_cost(cell: &Cell, class: Class) -> f32 {
-    if !cell.terrain.walkable() {
-        return f32::INFINITY;
-    }
-    match cell.structure {
-        Some(Structure::Built { hp, .. }) => class.wall_cost(hp),
-        Some(Structure::CommandCenter) | None => 1.0,
+/// What breaking through a structure adds to a cell's cost (nothing for the Command Center,
+/// since reaching it is the point).
+fn structure_cost(structure: Option<Structure>, class: Class) -> f32 {
+    match structure {
+        Some(Structure::Built { hp, .. }) => class.wall_cost(hp) - 1.0,
+        Some(Structure::CommandCenter) | None => 0.0,
     }
 }
 
@@ -174,6 +196,9 @@ pub struct FlowField {
     direction: Vec<Vec2>,
     /// Per node: whether every cell in it is clear (see [`is_clear`]).
     clear: Vec<bool>,
+    /// Per node: how fast the class moves over its terrain, on average over its walkable cells
+    /// (a fraction of its speed on open ground).
+    speed: Vec<f32>,
 }
 
 impl FlowField {
@@ -189,47 +214,71 @@ impl FlowField {
             distance: Vec::new(),
             direction: Vec::new(),
             clear: Vec::new(),
+            speed: Vec::new(),
         };
         let Some(bounds) = grid.bounds() else {
             return empty;
         };
-        // Each cell's cost over open ground (infinite if impassable), and whether it's clear.
+        // Each cell's terrain cost (infinite if impassable), what breaking through what stands
+        // on it adds, whether it's clear, and how fast the class moves over it.
         let cells_size = bounds.size() + IVec2::ONE;
-        let mut cell_extra = Vec::with_capacity((cells_size.x * cells_size.y) as usize);
-        let mut cell_clear = Vec::with_capacity(cell_extra.capacity());
+        let cell_count = (cells_size.x * cells_size.y) as usize;
+        let mut cell_terrain = Vec::with_capacity(cell_count);
+        let mut cell_extra = Vec::with_capacity(cell_count);
+        let mut cell_clear = Vec::with_capacity(cell_count);
+        let mut cell_speed = Vec::with_capacity(cell_count);
         for y in 0..cells_size.y {
             for x in 0..cells_size.x {
                 match grid.cell(bounds.min + IVec2::new(x, y)) {
                     Some(cell) => {
-                        cell_extra.push(cell_cost(cell, class) - 1.0);
+                        cell_terrain.push(class.terrain_cost(cell.terrain));
+                        cell_extra.push(structure_cost(cell.structure, class));
                         cell_clear.push(is_clear(cell));
+                        cell_speed.push(class.speed_on(cell.terrain));
                     }
                     None => {
-                        cell_extra.push(f32::INFINITY);
+                        cell_terrain.push(f32::INFINITY);
+                        cell_extra.push(0.0);
                         cell_clear.push(false);
+                        cell_speed.push(0.0);
                     }
                 }
             }
         }
-        // A node costs 1 plus its cells' extra cost, shared out over its span: crossing a wall
+        // A node's terrain costs the average of its cells' (the whole node wades through what's
+        // under it). What stands in it is shared out over its span instead: crossing a wall
         // head-on, a node's worth of cells passes over it once per cell of the span, so each wall
         // in the way is paid for about once.
         let size = (cells_size - IVec2::splat(span - 1)).max(IVec2::ZERO);
         let count = (size.x * size.y) as usize;
+        let cells_per_node = (span * span) as f32;
         let mut cost = Vec::with_capacity(count);
         let mut clear = Vec::with_capacity(count);
+        let mut speed = Vec::with_capacity(count);
         for y in 0..size.y {
             for x in 0..size.x {
-                let (mut extra, mut all_clear) = (0.0, true);
+                let (mut terrain, mut extra, mut all_clear) = (0.0, 0.0, true);
+                let (mut pace, mut walkable) = (0.0, 0);
                 for dy in 0..span {
                     for dx in 0..span {
                         let i = ((y + dy) * cells_size.x + x + dx) as usize;
+                        terrain += cell_terrain[i];
                         extra += cell_extra[i];
                         all_clear &= cell_clear[i];
+                        if cell_speed[i] > 0.0 {
+                            pace += cell_speed[i];
+                            walkable += 1;
+                        }
                     }
                 }
-                cost.push(1.0 + extra / span as f32);
+                cost.push(terrain / cells_per_node + extra / span as f32);
                 clear.push(all_clear);
+                // A brute brushing past rock moves at the pace of the ground it's on.
+                speed.push(if walkable > 0 {
+                    pace / walkable as f32
+                } else {
+                    1.0
+                });
             }
         }
         let mut field = Self {
@@ -240,6 +289,7 @@ impl FlowField {
             distance: vec![f32::INFINITY; count],
             direction: vec![Vec2::ZERO; count],
             clear,
+            speed,
         };
         let mut target_nodes = Vec::new();
         for target in targets {
@@ -316,6 +366,14 @@ impl FlowField {
     /// [`is_clear`].
     pub fn is_clear(&self, node: IVec2) -> bool {
         self.index(node).is_some_and(|i| self.clear[i])
+    }
+
+    /// How fast the class moves at a point on the ground (world x and z), as a fraction of its
+    /// speed on open ground: the average over the walkable cells of the nearest node. 1 off the
+    /// map.
+    pub fn speed_at(&self, point: Vec2) -> f32 {
+        self.index(self.node_at(point))
+            .map_or(1.0, |i| self.speed[i])
     }
 
     /// Whether something stands in the way in `node`, but it can be broken through (a wall, not
@@ -757,6 +815,96 @@ mod tests {
         assert!(angle_between(left, between) < angle_between(left, right));
         assert!(angle_between(between, right) < angle_between(left, right));
         assert!((between.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mud_costs_the_time_it_takes_to_cross() {
+        use crate::tuning::terrain::{BRUTE_MUD_SPEED, SWARMER_MUD_SPEED};
+        assert_eq!(Class::Swarmer.terrain_cost(Terrain::Ground), 1.0);
+        assert_eq!(
+            Class::Swarmer.terrain_cost(Terrain::Mud),
+            1.0 / SWARMER_MUD_SPEED
+        );
+        assert_eq!(
+            Class::Brute.terrain_cost(Terrain::Mud),
+            1.0 / BRUTE_MUD_SPEED
+        );
+        assert!(Class::Brute.terrain_cost(Terrain::Rock).is_infinite());
+        // Crossing a strip of mud 4 cells deep, head-on.
+        let mut grid = open_ground();
+        for y in 6..10 {
+            for x in 0..CHUNK_SIZE {
+                grid.set_terrain(IVec2::new(x, y), Terrain::Mud);
+            }
+        }
+        let target = IVec2::new(8, 1);
+        let start = IVec2::new(8, 13);
+        for class in [Class::Swarmer, Class::Brute] {
+            let dry = FlowField::new(&open_ground(), class, [target]);
+            let wet = FlowField::new(&grid, class, [target]);
+            let node = wet.node_at(cell_middle(start));
+            let extra = wet.distance(node) - dry.distance(node);
+            // A brute's block is averaged over its cells rather than summed: wading through
+            // mud is paid once per cell crossed, like a swarmer's.
+            let expected = 4.0 * (class.terrain_cost(Terrain::Mud) - 1.0);
+            assert!(
+                (extra - expected).abs() < 0.05,
+                "{class:?}: {extra} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_horde_wades_through_mud_only_when_going_round_takes_longer() {
+        let target = IVec2::new(8, 1);
+        let start = IVec2::new(8, 14);
+        // A small pool on the straight line: go round it.
+        let mut grid = open_ground();
+        for y in 6..9 {
+            for x in 7..10 {
+                grid.set_terrain(IVec2::new(x, y), Terrain::Mud);
+            }
+        }
+        let field = FlowField::new(&grid, Class::Swarmer, [target]);
+        let is_mud = |grid: &Grid, cell: IVec2| grid.cell(cell).unwrap().terrain == Terrain::Mud;
+        assert!(!field.route(start).iter().any(|&cell| is_mud(&grid, cell)));
+        // Mud from edge to edge: straight through.
+        for y in 6..9 {
+            for x in 0..CHUNK_SIZE {
+                grid.set_terrain(IVec2::new(x, y), Terrain::Mud);
+            }
+        }
+        let field = FlowField::new(&grid, Class::Swarmer, [target]);
+        let route = field.route(start);
+        assert!(
+            route.iter().filter(|&&cell| is_mud(&grid, cell)).count() <= 4,
+            "{route:?}"
+        );
+    }
+
+    #[test]
+    fn speed_follows_the_terrain_underfoot() {
+        use crate::tuning::terrain::{BRUTE_MUD_SPEED, SWARMER_MUD_SPEED};
+        let mut grid = open_ground();
+        // Mud on every cell with x below 5, and a rock at (8, 5).
+        for y in 0..CHUNK_SIZE {
+            for x in 0..5 {
+                grid.set_terrain(IVec2::new(x, y), Terrain::Mud);
+            }
+        }
+        grid.set_terrain(IVec2::new(8, 5), Terrain::Rock);
+        let target = [IVec2::new(12, 12)];
+        let swarmers = FlowField::new(&grid, Class::Swarmer, target);
+        assert_eq!(swarmers.speed_at(Vec2::new(4.5, 5.5)), SWARMER_MUD_SPEED);
+        assert_eq!(swarmers.speed_at(Vec2::new(5.5, 5.5)), 1.0);
+        assert_eq!(swarmers.speed_at(Vec2::new(-5.0, 5.0)), 1.0, "off the map");
+        let brutes = FlowField::new(&grid, Class::Brute, target);
+        // Straddling the edge of the mud: half and half.
+        let half = (1.0 + BRUTE_MUD_SPEED) / 2.0;
+        assert!((brutes.speed_at(Vec2::new(5.0, 5.0)) - half).abs() < 1e-6);
+        assert_eq!(brutes.speed_at(Vec2::new(3.0, 5.0)), BRUTE_MUD_SPEED);
+        // Brushing past rock doesn't slow it down.
+        assert_eq!(brutes.speed_at(Vec2::new(8.0, 5.0)), 1.0);
     }
 
     #[test]
