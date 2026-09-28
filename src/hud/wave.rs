@@ -2,20 +2,26 @@
 //!
 //! - Bottom-right, the wave box. In the build phase it previews the next wave (its counts, packs
 //!   and how much tougher it is) above a "Start wave" button; in the wave phase it shows how far
-//!   the wave has come, above the speed button.
-//! - A label on the map by each nest, with what's coming out of it (build phase).
+//!   the wave has come, above the speed button. Asking to start the wave before claiming a chunk
+//!   shakes the button and flashes it red.
+//! - A label on the map by each live nest, with what's coming out of it (build phase). While the
+//!   cursor is on an offered chunk, the labels (and the wave box) are for the map with it claimed,
+//!   and a nest that claim would quiet says so.
 //! - A banner when a wave is cleared.
 //! - The game-over screen: waves survived, the best run this session, and a Restart button.
 
 use super::FONT_SIZE;
 use crate::camera::MainCamera;
 use crate::chunks::ChunkOffer;
-use crate::grid::Grid;
+use crate::grid::{Footprint, Grid};
 use crate::horde::{BruteQueue, Health, SpawnQueue};
 use crate::palette;
-use crate::tuning::juice::{GAME_OVER_DELAY, WAVE_BANNER_SECONDS};
+use crate::preview::WhatIf;
+use crate::tuning::juice::{CLAIM_FIRST_SECONDS, GAME_OVER_DELAY, WAVE_BANNER_SECONDS};
 use crate::waves::plan::{Run, Wave, nest_share};
-use crate::waves::{ActiveWave, CurrentWave, FlowButton, GameSpeed, Phase, WaveCleared};
+use crate::waves::{
+    ActiveWave, ClaimFirst, CurrentWave, FlowButton, GameSpeed, Phase, WaveCleared,
+};
 use bevy::prelude::*;
 
 const TITLE_FONT_SIZE: f32 = 20.0;
@@ -23,6 +29,8 @@ const BANNER_FONT_SIZE: f32 = 34.0;
 const GAME_OVER_FONT_SIZE: f32 = 40.0;
 const LABEL_FONT_SIZE: f32 = 13.0;
 const BOX_WIDTH: f32 = 230.0;
+/// How far the Start button shakes when the wave can't start yet (logical pixels).
+const REFUSE_SHAKE: f32 = 6.0;
 /// Where the "wave cleared" banner sits, from the top of the screen.
 const BANNER_TOP: Val = Val::Percent(22.0);
 
@@ -41,6 +49,7 @@ impl Plugin for WaveHudPlugin {
                     show_banner,
                     show_game_over,
                     hover_buttons,
+                    refuse_start,
                 ),
             );
     }
@@ -164,6 +173,7 @@ fn show_wave_box(
     phase: Res<State<Phase>>,
     wave: Res<CurrentWave>,
     grid: Res<Grid>,
+    what_if: Res<WhatIf>,
     offer: Res<ChunkOffer>,
     active: Res<ActiveWave>,
     speed: Res<GameSpeed>,
@@ -175,7 +185,7 @@ fn show_wave_box(
 ) {
     let claim_first = *phase.get() == Phase::Build && offer.pending(&grid);
     let lines = match phase.get() {
-        Phase::Build => preview(&wave.0, grid.nests.len(), claim_first),
+        Phase::Build => preview(&wave.0, what_if.grid(&grid).live_nests().len(), claim_first),
         Phase::Wave => {
             let (released, packs) = active.0.progress();
             let left = enemies.iter().len() as u32 + swarmers.waiting + brutes.waiting;
@@ -252,21 +262,92 @@ fn hover_buttons(
     }
 }
 
+/// Asking to start the wave before a chunk is claimed shakes the Start button and flashes its
+/// border red.
+fn refuse_start(
+    time: Res<Time<Real>>,
+    mut asked: MessageReader<ClaimFirst>,
+    mut left: Local<f32>,
+    button: Single<(&mut UiTransform, &mut BorderColor), With<WaveButton>>,
+) {
+    if asked.read().count() > 0 {
+        *left = CLAIM_FIRST_SECONDS;
+    }
+    if *left <= 0.0 {
+        return;
+    }
+    *left = (*left - time.delta_secs()).max(0.0);
+    let (mut transform, mut border) = button.into_inner();
+    let strength = *left / CLAIM_FIRST_SECONDS;
+    let shake = (time.elapsed_secs() * 70.0).sin() * REFUSE_SHAKE * strength;
+    transform.translation = Val2::px(shake, 0.0);
+    let color = palette::PANEL_CHOSEN.mix(&palette::BROKE, strength);
+    *border = BorderColor::all(color);
+}
+
 /// A label on the map by a nest, saying what will come out of it.
 #[derive(Component)]
-struct NestLabel(usize);
+struct NestLabel {
+    nest: Footprint,
+    note: NestNote,
+}
 
-/// Keeps a label for every nest, as nests come and go with claimed chunks.
-fn spawn_nest_labels(mut commands: Commands, grid: Res<Grid>, labels: Query<(Entity, &NestLabel)>) {
-    let nests = grid.nests.len();
-    for (entity, label) in &labels {
-        if label.0 >= nests {
-            commands.entity(entity).despawn();
+/// What a nest's label says.
+#[derive(Clone, Debug, PartialEq)]
+enum NestNote {
+    /// What comes out of it next wave.
+    Coming(String),
+    /// A claim under consideration would make it go quiet.
+    GoesQuiet,
+}
+
+/// The labels for the live nests of the map `shown` (a what-if's, or the `real` one), each with
+/// its share of `wave`, and for the nests live now that wouldn't be.
+fn nest_notes(real: &Grid, shown: &Grid, wave: &Wave) -> Vec<(Footprint, NestNote)> {
+    let live = shown.live_nests();
+    // The nests take turns, so each gets its exact share.
+    let coming = live.iter().enumerate().map(|(index, &nest)| {
+        let share = |total| nest_share(total, live.len(), index);
+        let note = format!(
+            "{} coming",
+            counts(share(wave.swarmers), share(wave.brutes))
+        );
+        (nest, NestNote::Coming(note))
+    });
+    let quieted = real
+        .live_nests()
+        .iter()
+        .filter(|nest| !live.contains(nest))
+        .map(|&nest| (nest, NestNote::GoesQuiet));
+    coming.chain(quieted).collect()
+}
+
+/// Keeps a label for every live nest, as nests come and go with claimed chunks (or with the one
+/// under the cursor).
+fn spawn_nest_labels(
+    mut commands: Commands,
+    grid: Res<Grid>,
+    what_if: Res<WhatIf>,
+    wave: Res<CurrentWave>,
+    mut labels: Query<(Entity, &mut NestLabel)>,
+) {
+    if !grid.is_changed() && !what_if.is_changed() && !wave.is_changed() {
+        return;
+    }
+    let notes = nest_notes(&grid, what_if.grid(&grid), &wave.0);
+    for (entity, mut label) in &mut labels {
+        match notes.iter().find(|(nest, _)| *nest == label.nest) {
+            Some((_, note)) if label.note != *note => label.note = note.clone(),
+            Some(_) => {}
+            None => commands.entity(entity).despawn(),
         }
     }
-    for index in labels.iter().len()..nests {
+    for (nest, note) in notes {
+        if labels.iter().any(|(_, label)| label.nest == nest) {
+            continue;
+        }
         commands.spawn((
-            NestLabel(index),
+            NestLabel { nest, note },
             Node {
                 position_type: PositionType::Absolute,
                 padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
@@ -283,8 +364,6 @@ fn spawn_nest_labels(mut commands: Commands, grid: Res<Grid>, labels: Query<(Ent
 fn show_nest_labels(
     time: Res<Time<Real>>,
     phase: Res<State<Phase>>,
-    wave: Res<CurrentWave>,
-    grid: Res<Grid>,
     camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
     mut labels: Query<(
         &NestLabel,
@@ -296,11 +375,8 @@ fn show_nest_labels(
     )>,
 ) {
     let (camera, transform) = *camera;
-    let nests = grid.nests.len();
     for (label, mut node, mut text, mut color, mut visibility, computed) in &mut labels {
-        let Some(nest) = grid.nests.get(label.0) else {
-            continue;
-        };
+        let nest = label.nest;
         // Beside the nest, clear of the path preview's arrows coming out of it.
         let at = nest.center() + Vec3::new(nest.size as f32 / 2.0 + 0.5, 0.0, 0.0);
         let shown = *phase.get() == Phase::Build;
@@ -311,23 +387,24 @@ fn show_nest_labels(
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
-        // The nests take turns, so each gets its exact share.
-        let value = format!(
-            "{} coming",
-            counts(
-                nest_share(wave.0.swarmers, nests, label.0),
-                nest_share(wave.0.brutes, nests, label.0)
-            )
-        );
+        let (value, tint) = match &label.note {
+            NestNote::Coming(coming) => {
+                let pulse = 0.75 + 0.25 * (time.elapsed_secs() * 3.0).sin();
+                (coming.as_str(), palette::PATH_PREVIEW.with_alpha(pulse))
+            }
+            NestNote::GoesQuiet => ("Goes quiet", palette::HINT_TEXT),
+        };
         if text.0 != value {
-            text.0 = value;
+            text.0 = value.to_string();
         }
+        color.0 = tint;
         let size = computed.size() * computed.inverse_scale_factor();
         node.left = Val::Px(at.x);
         node.top = Val::Px(at.y - size.y / 2.0);
-        let pulse = 0.75 + 0.25 * (time.elapsed_secs() * 3.0).sin();
-        color.0 = palette::PATH_PREVIEW.with_alpha(pulse);
-        visibility.set_if_neq(Visibility::Inherited);
+        // Hidden until it's been laid out once, so it doesn't flash in the corner.
+        if size.x > 0.0 {
+            visibility.set_if_neq(Visibility::Inherited);
+        }
     }
 }
 
@@ -534,5 +611,37 @@ mod tests {
         assert_eq!(fronts[2], "3 packs from 3 nests, enemy HP +24%");
         assert_eq!(fronts[3], "Claim new ground first");
         assert_eq!(counts(0, 1), "1 brute");
+    }
+
+    #[test]
+    fn nest_labels_follow_the_map_shown() {
+        use crate::tuning::chunks::LIVE_NESTS;
+        let nest = |x| Footprint {
+            min: IVec2::new(x * 4, 0),
+            size: 2,
+        };
+        let mut real = Grid::default();
+        real.nests = (0..LIVE_NESTS as i32).map(nest).collect();
+        let wave = wave(1);
+        let coming = |notes: &[(Footprint, NestNote)]| {
+            notes
+                .iter()
+                .filter(|(_, note)| matches!(note, NestNote::Coming(_)))
+                .count()
+        };
+        let notes = nest_notes(&real, &real, &wave);
+        assert_eq!(coming(&notes), LIVE_NESTS);
+        assert_eq!(notes.len(), LIVE_NESTS);
+        assert_eq!(
+            notes[0].1,
+            NestNote::Coming(format!("{} swarmers coming", 100 / LIVE_NESTS))
+        );
+        // With one more nest claimed, the oldest goes quiet and the new one gets a share.
+        let mut shown = real.clone();
+        shown.nests.push(nest(LIVE_NESTS as i32));
+        let notes = nest_notes(&real, &shown, &wave);
+        assert_eq!(coming(&notes), LIVE_NESTS);
+        assert_eq!(notes.last(), Some(&(nest(0), NestNote::GoesQuiet)));
+        assert!(notes.iter().any(|&(at, _)| at == nest(LIVE_NESTS as i32)));
     }
 }

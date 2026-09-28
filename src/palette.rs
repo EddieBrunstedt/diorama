@@ -56,6 +56,11 @@ pub const CHITIN_DARK: Color = Color::srgb(0.3, 0.1, 0.26);
 pub const ACID: Color = Color::srgb(0.75, 1.0, 0.2);
 pub const CREEP: Color = Color::srgb(0.2, 0.1, 0.19);
 pub const NEST_PIT: Color = Color::srgb(0.08, 0.03, 0.07);
+/// A nest gone quiet: its pit crusted over and cracked, its chitin dull, its eggs dead.
+pub const NEST_CRUST: Color = Color::srgb(0.2, 0.16, 0.17);
+pub const NEST_CRACK: Color = Color::srgb(0.1, 0.07, 0.08);
+pub const CHITIN_QUIET: Color = Color::srgb(0.32, 0.25, 0.29);
+pub const EGG_DEAD: Color = Color::srgb(0.27, 0.27, 0.2);
 /// Brutes: darker, heavier shell than a swarmer's, with pale bone scythes and spikes.
 pub const BRUTE_SHELL: Color = Color::srgb(0.36, 0.13, 0.27);
 pub const BRUTE_PLATE: Color = Color::srgb(0.52, 0.2, 0.38);

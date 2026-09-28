@@ -141,6 +141,9 @@ pub mod chunks {
     pub const OFFERED: usize = 3;
     pub const NEST_CHANCE: (f32, f32) = (0.2, 0.8);
     pub const NEST_CHANCE_WAVES: u32 = 20;
+    /// At most this many nests are live. Claiming a nest past that makes the oldest live one go
+    /// quiet: it stays on the map, but nothing comes out of it any more.
+    pub const LIVE_NESTS: usize = 5;
 }
 
 /// Waves: how big they get, what's in them, and how they come out of the nests. See
@@ -317,6 +320,8 @@ pub mod juice {
     /// A nest heaves (stretch amount) as swarmers come out, at most once per interval (seconds).
     pub const NEST_PULSE: f32 = 0.3;
     pub const NEST_PULSE_INTERVAL: f32 = 0.18;
+    /// A nest going quiet squashes down this much (a negative stretch) as it crusts over.
+    pub const NEST_QUIET_THUMP: f32 = 0.45;
     /// The Command Center flinches (squash), flashes and shakes the camera when it's hit, and
     /// the swarmer bursts into gibs. Only so many bursts a frame, however many arrive at once.
     pub const BASE_HIT_SQUASH: f32 = -0.12;
@@ -487,6 +492,11 @@ pub mod juice {
     /// the cursor is on it.
     pub const OFFER_PULSE_RATE: f32 = 1.2;
     pub const OFFER_HOVER_LIFT: f32 = 0.25;
+    /// Asking to start the wave before claiming a chunk: the Start button shakes and flashes red,
+    /// and the claim hint lights up, for this long (real seconds), and the offered chunks hop
+    /// this high.
+    pub const CLAIM_FIRST_SECONDS: f32 = 0.45;
+    pub const CLAIM_FIRST_HOP: f32 = 0.9;
 
     /// Fire, sparks, flashes and tracers glow this many times brighter than their color.
     pub const GLOW_BRIGHTNESS: f32 = 2.5;

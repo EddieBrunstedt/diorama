@@ -38,6 +38,7 @@ impl Plugin for WavesPlugin {
             .init_resource::<GameSpeed>()
             .add_message::<FlowButton>()
             .add_message::<WaveCleared>()
+            .add_message::<ClaimFirst>()
             .add_systems(PreStartup, start_run)
             .add_systems(OnEnter(Phase::Wave), (begin_wave, speed_up))
             .add_systems(OnExit(Phase::Wave), slow_down)
@@ -88,6 +89,10 @@ pub enum FlowButton {
     /// Start a new run (R).
     Restart,
 }
+
+/// The player asked to start the wave while a chunk still has to be claimed.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct ClaimFirst;
 
 /// Wave `wave` was cleared, and paid `bonus`.
 #[derive(Message, Clone, Copy, Debug)]
@@ -147,13 +152,18 @@ fn start_wave(
     grid: Res<Grid>,
     offer: Res<ChunkOffer>,
     mut next: ResMut<NextState<Phase>>,
+    mut claim_first: MessageWriter<ClaimFirst>,
 ) {
     let clicked = buttons
         .read()
         .any(|&button| button == FlowButton::StartWave);
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    let ready = !grid.nests.is_empty() && !offer.pending(&grid);
-    if (clicked || (keys.just_pressed(KeyCode::Space) && !ctrl)) && ready {
+    if !clicked && !(keys.just_pressed(KeyCode::Space) && !ctrl) {
+        return;
+    }
+    if offer.pending(&grid) {
+        claim_first.write(ClaimFirst);
+    } else if !grid.live_nests().is_empty() {
         next.set(Phase::Wave);
     }
 }

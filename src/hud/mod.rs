@@ -2,8 +2,9 @@
 //! phase and the size of the horde at the top, a controls hint for the phase under the money, the
 //! wave preview and the game-over screen ([`wave`]), and a small HP bar over the wall, tower or
 //! Command Center under the cursor, with what selling or repairing it would pay or cost (in the
-//! build phase). Undo and redo dim when there's nothing to undo or redo. Labels name the chunks
-//! offered after a wave ([`offer`]).
+//! build phase). Undo and redo dim when there's nothing to undo or redo, and the line saying how
+//! to claim a chunk lights up when the player tries to start the wave first. Labels name the
+//! chunks offered after a wave ([`offer`]).
 
 mod money;
 mod offer;
@@ -20,7 +21,8 @@ use crate::grid::{Grid, Structure, cell_center};
 use crate::horde::{Brute, BruteQueue, SpawnQueue, Swarmer};
 use crate::palette;
 use crate::pointer::{Pointer, PointerSystems, column_top};
-use crate::waves::{CurrentWave, Phase};
+use crate::tuning::juice::CLAIM_FIRST_SECONDS;
+use crate::waves::{ClaimFirst, CurrentWave, Phase};
 use bevy::prelude::*;
 
 const FONT_SIZE: f32 = 15.0;
@@ -28,6 +30,8 @@ const FONT_SIZE: f32 = 15.0;
 const HINT_TOP: f32 = 64.0;
 /// How faint a hint line is while it can't do anything.
 const DIMMED_ALPHA: f32 = 0.3;
+/// How much the claim hint swells when it lights up.
+const CLAIM_HINT_SWELL: f32 = 0.2;
 /// The health bar's size, and the fraction of HP below which it turns red.
 const BAR_SIZE: Vec2 = Vec2::new(260.0, 10.0);
 const LOW_HEALTH: f32 = 0.3;
@@ -49,7 +53,11 @@ impl Plugin for HudPlugin {
         .add_systems(Startup, (spawn_hint, spawn_status, spawn_wall_bar))
         .add_systems(
             Update,
-            (show_hint, show_status, show_wall_bar.after(PointerSystems)),
+            (
+                (show_hint, light_claim_hint).chain(),
+                show_status,
+                show_wall_bar.after(PointerSystems),
+            ),
         );
     }
 }
@@ -262,6 +270,34 @@ fn show_hint(
         }
         let alpha = palette::HINT_TEXT.alpha() * if usable { 1.0 } else { DIMMED_ALPHA };
         color.set_if_neq(TextColor(palette::HINT_TEXT.with_alpha(alpha)));
+    }
+}
+
+/// Asking to start the wave before a chunk is claimed lights up the line saying how to claim one.
+fn light_claim_hint(
+    time: Res<Time<Real>>,
+    mut asked: MessageReader<ClaimFirst>,
+    mut left: Local<f32>,
+    mut lines: Query<(&HintLine, &mut TextColor, &mut UiTransform, &ComputedNode)>,
+) {
+    if asked.read().count() > 0 {
+        *left = CLAIM_FIRST_SECONDS;
+    }
+    if *left <= 0.0 {
+        return;
+    }
+    *left = (*left - time.delta_secs()).max(0.0);
+    let strength = *left / CLAIM_FIRST_SECONDS;
+    for (line, mut color, mut transform, computed) in &mut lines {
+        if *line != HintLine::Claim {
+            continue;
+        }
+        color.0 = palette::HINT_TEXT.mix(&palette::OFFER_FRAME, strength);
+        // Swelling from its left end, which lines up with the others.
+        let swell = CLAIM_HINT_SWELL * strength;
+        let width = computed.size().x * computed.inverse_scale_factor();
+        transform.scale = Vec2::splat(1.0 + swell);
+        transform.translation = Val2::px(width * swell / 2.0, 0.0);
     }
 }
 

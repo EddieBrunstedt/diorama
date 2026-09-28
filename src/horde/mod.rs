@@ -23,7 +23,7 @@ mod nest;
 
 use crate::command_center::CommandCenterHit;
 use crate::flow::{Class, FlowFields, FlowSystems};
-use crate::grid::Grid;
+use crate::grid::{Footprint, Grid};
 use crate::map::Landmarks;
 use crate::palette;
 use crate::rng::{Rng, RunSeed};
@@ -172,7 +172,7 @@ impl SpawnQueue {
 /// Swarmers came out of a nest this frame.
 #[derive(Message, Clone, Copy, Debug)]
 pub struct SwarmersEmerged {
-    pub nest: usize,
+    pub nest: Footprint,
 }
 
 #[derive(Component, Clone, Debug)]
@@ -310,7 +310,8 @@ fn spawn_swarmers(
     mut rng: ResMut<HordeRng>,
     mut emerged: MessageWriter<SwarmersEmerged>,
 ) {
-    if queue.waiting == 0 || grid.nests.is_empty() {
+    let nests = grid.live_nests();
+    if queue.waiting == 0 || nests.is_empty() {
         queue.owed = 0.0;
         return;
     }
@@ -319,7 +320,6 @@ fn spawn_swarmers(
     queue.owed -= count as f32;
     queue.waiting -= count;
     let rng = &mut rng.0;
-    let nests = &grid.nests;
     let mut from = vec![false; nests.len()];
     let first = queue.turn;
     queue.turn += count as usize;
@@ -357,7 +357,7 @@ fn spawn_swarmers(
     commands.spawn_batch(batch);
     for (nest, &any) in from.iter().enumerate() {
         if any {
-            emerged.write(SwarmersEmerged { nest });
+            emerged.write(SwarmersEmerged { nest: nests[nest] });
         }
     }
 }

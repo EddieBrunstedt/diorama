@@ -210,7 +210,8 @@ pub(super) fn spawn_brutes(
     mut rng: ResMut<HordeRng>,
     mut emerged: MessageWriter<SwarmersEmerged>,
 ) {
-    if queue.waiting == 0 || grid.nests.is_empty() {
+    let nests = grid.live_nests();
+    if queue.waiting == 0 || nests.is_empty() {
         queue.next = 0.0;
         return;
     }
@@ -221,9 +222,9 @@ pub(super) fn spawn_brutes(
     queue.next = BRUTE_SPAWN_INTERVAL;
     queue.waiting -= 1;
     let rng = &mut rng.0;
-    let nest = queue.turn % grid.nests.len();
+    let nest = nests[queue.turn % nests.len()];
     queue.turn += 1;
-    let at = grid.nests[nest].center().xz() + Vec2::new(rng.range(-0.2, 0.2), rng.range(-0.2, 0.2));
+    let at = nest.center().xz() + Vec2::new(rng.range(-0.2, 0.2), rng.range(-0.2, 0.2));
     let fallback = Vec2::from_angle(rng.range(0.0, std::f32::consts::TAU));
     commands.spawn((
         Brute {

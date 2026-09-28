@@ -1,10 +1,12 @@
 //! Labels over the chunks offered after a wave: each chunk's name, and for one with a nest, a
-//! warning and what claiming it pays. The label of the chunk under the cursor lights up.
+//! warning and what claiming it pays (and, once there are as many live nests as there can be,
+//! that the oldest goes quiet). The label of the chunk under the cursor lights up.
 
 use crate::camera::MainCamera;
 use crate::chunks::{ChunkOffer, OfferHover, chunk_area, templates::Claim};
 use crate::grid::Grid;
 use crate::palette;
+use crate::tuning::chunks::LIVE_NESTS;
 use bevy::prelude::*;
 
 const NAME_FONT_SIZE: f32 = 16.0;
@@ -32,6 +34,7 @@ fn spawn_labels(
     if !offer.is_changed() && !grid.is_changed() {
         return;
     }
+    let quiets = grid.live_nests().len() >= LIVE_NESTS;
     let (wanted, bounty) = match &offer.0 {
         Some(offer) if offer.pending(&grid) => (offer.choices.clone(), offer.bounty),
         _ => (Vec::new(), 0),
@@ -85,6 +88,14 @@ fn spawn_labels(
                     TextColor(if nest { color } else { palette::HINT_TEXT }),
                     Pickable::IGNORE,
                 ));
+                if nest && quiets {
+                    label.spawn((
+                        Text::new("Oldest nest goes quiet"),
+                        TextFont::from_font_size(NOTE_FONT_SIZE),
+                        TextColor(palette::HINT_TEXT),
+                        Pickable::IGNORE,
+                    ));
+                }
             });
     }
 }

@@ -4,6 +4,10 @@
 //! or redone, and flares up to show it did. Where a way goes through a wall (the horde would
 //! rather break it than walk around), the arrows turn red and climb over it, and a pulsing red
 //! marker sits on each wall that class will break, with a pip in the class's color.
+//!
+//! It can also show a map that isn't real yet ([`WhatIf`]): while the cursor is on an offered
+//! chunk, the routes and breaches as they'd be with that chunk claimed. Whatever the claim would
+//! change stands out, and the rest fades.
 
 use crate::flow::{Class, FlowFields, FlowSystems};
 use crate::grid::{Grid, cell_center};
@@ -31,6 +35,8 @@ const FLARE: f32 = 0.7;
 /// Rounding passes over the route's corners.
 const SMOOTHING: usize = 2;
 const ALPHA: f32 = 0.85;
+/// What a what-if wouldn't change is drawn this faint.
+const FADED_ALPHA: f32 = 0.22;
 /// Arrows going through a wall are this much bigger, so the breach point stands out.
 const BREACH_SCALE: f32 = 1.5;
 /// Brutes' arrows are this much bigger than swarmers'.
@@ -50,15 +56,61 @@ impl Plugin for PreviewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PreviewAssets>()
             .init_resource::<Routes>()
+            .init_resource::<WhatIf>()
             .add_systems(
                 Update,
                 (
-                    trace_routes.run_if(resource_changed::<FlowFields>),
+                    trace_routes
+                        .run_if(resource_changed::<FlowFields>.or_else(resource_changed::<WhatIf>)),
                     (show_arrows, show_breaches),
                 )
                     .chain()
+                    .in_set(PreviewSystems)
                     .after(FlowSystems),
             );
+    }
+}
+
+/// Draws the path preview. Whatever sets [`WhatIf`] runs before.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PreviewSystems;
+
+/// A map the preview shows instead of the real one, while it's set: how the map would be after
+/// an edit the player is weighing up (see [`crate::chunks`]).
+#[derive(Resource, Default)]
+pub struct WhatIf(pub Option<Box<Scenario>>);
+
+impl WhatIf {
+    /// The map the preview shows: the one in the scenario, or the real one.
+    pub fn grid<'a>(&'a self, real: &'a Grid) -> &'a Grid {
+        self.0.as_ref().map_or(real, |scenario| &scenario.grid)
+    }
+}
+
+/// The map as it would be, and its flow fields.
+pub struct Scenario {
+    pub grid: Grid,
+    pub fields: FlowFields,
+    /// A chunk drawn lifted (an offered chunk under the cursor), and how high.
+    pub raised: Option<(IVec2, f32)>,
+}
+
+impl Scenario {
+    pub fn new(grid: Grid, landmarks: &Landmarks, raised: Option<(IVec2, f32)>) -> Self {
+        let fields = FlowFields::new(&grid, landmarks);
+        Self {
+            grid,
+            fields,
+            raised,
+        }
+    }
+
+    /// How high the ground of `cell` is lifted.
+    fn lift(&self, cell: IVec2) -> f32 {
+        match self.raised {
+            Some((chunk, lift)) if Grid::chunk_of(cell) == chunk => lift,
+            _ => 0.0,
+        }
     }
 }
 
@@ -136,6 +188,8 @@ pub fn smooth(points: &[Vec2], passes: usize) -> Vec<Vec2> {
 struct Route {
     class: Class,
     line: Polyline,
+    /// Shown faded: a [`WhatIf`] wouldn't change it.
+    faded: bool,
 }
 
 /// A wall some class will break through, and which classes.
@@ -144,6 +198,8 @@ struct Breach {
     cell: IVec2,
     /// Per class, in [`CLASSES`] order.
     by: [bool; 2],
+    /// Shown faded: a [`WhatIf`] wouldn't change it.
+    faded: bool,
 }
 
 const CLASSES: [Class; 2] = [Class::Swarmer, Class::Brute];
@@ -161,13 +217,31 @@ fn trace_routes(
     time: Res<Time<Real>>,
     fields: Res<FlowFields>,
     grid: Res<Grid>,
+    what_if: Res<WhatIf>,
     mut routes: ResMut<Routes>,
 ) {
+    let (mut lines, mut breaches) = trace(&grid, &fields);
+    if let Some(scenario) = &what_if.0 {
+        let (real_lines, real_breaches) = (lines, breaches);
+        (lines, breaches) = trace(&scenario.grid, &scenario.fields);
+        fade_the_same(&mut lines, &real_lines, &mut breaches, &real_breaches);
+    }
+    if lines != routes.routes || breaches != routes.breaches {
+        // The very first routes aren't a change worth flaring for.
+        let first = routes.routes.is_empty();
+        routes.routes = lines;
+        routes.breaches = breaches;
+        routes.changed_at = (!first).then(|| time.elapsed_secs());
+    }
+}
+
+/// Each class's route from each live nest, and the walls they break.
+fn trace(grid: &Grid, fields: &FlowFields) -> (Vec<Route>, Vec<Breach>) {
     let mut lines = Vec::new();
     let mut breaches: Vec<Breach> = Vec::new();
     for (index, &class) in CLASSES.iter().enumerate() {
         let field = fields.get(class);
-        for nest in &grid.nests {
+        for nest in grid.live_nests() {
             let start = nest.center().xz();
             let from = field.node_at(start);
             let mut points = vec![start];
@@ -181,25 +255,40 @@ fn trace_routes(
             lines.push(Route {
                 class,
                 line: Polyline::new(smooth(&points, SMOOTHING)),
+                faded: false,
             });
-            for cell in field.breaches(from, &grid) {
+            for cell in field.breaches(from, grid) {
                 match breaches.iter_mut().find(|breach| breach.cell == cell) {
                     Some(breach) => breach.by[index] = true,
                     None => {
                         let mut by = [false; 2];
                         by[index] = true;
-                        breaches.push(Breach { cell, by });
+                        breaches.push(Breach {
+                            cell,
+                            by,
+                            faded: false,
+                        });
                     }
                 }
             }
         }
     }
-    if lines != routes.routes || breaches != routes.breaches {
-        // The very first routes aren't a change worth flaring for.
-        let first = routes.routes.is_empty();
-        routes.routes = lines;
-        routes.breaches = breaches;
-        routes.changed_at = (!first).then(|| time.elapsed_secs());
+    (lines, breaches)
+}
+
+/// Fades the routes and breaches of a what-if that are just as they are on the real map, so what
+/// would change stands out.
+fn fade_the_same(
+    lines: &mut [Route],
+    real_lines: &[Route],
+    breaches: &mut [Breach],
+    real_breaches: &[Breach],
+) {
+    for route in lines {
+        route.faded = real_lines.contains(route);
+    }
+    for breach in breaches {
+        breach.faded = real_breaches.contains(breach);
     }
 }
 
@@ -214,11 +303,14 @@ fn flare(routes: &Routes, now: f32) -> f32 {
 #[derive(Resource)]
 struct PreviewAssets {
     arrow: Handle<Mesh>,
-    /// Arrow materials per class, in [`CLASSES`] order, and through a wall.
+    /// Arrow materials per class, in [`CLASSES`] order, and through a wall; then the same faded.
     arrows: [Handle<StandardMaterial>; 2],
     breach: Handle<StandardMaterial>,
+    arrows_faded: [Handle<StandardMaterial>; 2],
+    breach_faded: Handle<StandardMaterial>,
     marker: Handle<Mesh>,
     marker_material: Handle<StandardMaterial>,
+    marker_faded: Handle<StandardMaterial>,
     pip: Handle<Mesh>,
     pips: [Handle<StandardMaterial>; 2],
 }
@@ -237,19 +329,23 @@ impl FromWorld for PreviewAssets {
         );
         let pip = meshes.add(pip.build());
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        let mut see_through = |color: Color| {
+        let mut see_through = |color: Color, alpha: f32| {
             materials.add(StandardMaterial {
-                base_color: color.with_alpha(ALPHA),
+                base_color: color.with_alpha(alpha),
                 alpha_mode: AlphaMode::Blend,
                 unlit: true,
                 ..default()
             })
         };
-        let arrows = [
-            see_through(palette::PATH_PREVIEW),
-            see_through(palette::PATH_BRUTE),
-        ];
-        let breach = see_through(palette::PATH_BREACH);
+        let [arrows, arrows_faded] = [ALPHA, FADED_ALPHA].map(|alpha| {
+            [
+                see_through(palette::PATH_PREVIEW, alpha),
+                see_through(palette::PATH_BRUTE, alpha),
+            ]
+        });
+        let breach = see_through(palette::PATH_BREACH, ALPHA);
+        let breach_faded = see_through(palette::PATH_BREACH, FADED_ALPHA);
+        let marker_faded = see_through(palette::PATH_BREACH, FADED_ALPHA);
         let mut glowing = |color: Color, brightness: f32| {
             materials.add(StandardMaterial {
                 base_color: (color.to_linear() * brightness).with_alpha(1.0).into(),
@@ -266,8 +362,11 @@ impl FromWorld for PreviewAssets {
             arrow,
             arrows,
             breach,
+            arrows_faded,
+            breach_faded,
             marker,
             marker_material,
+            marker_faded,
             pip,
             pips,
         }
@@ -319,6 +418,7 @@ fn show_arrows(
     routes: Res<Routes>,
     fields: Res<FlowFields>,
     grid: Res<Grid>,
+    what_if: Res<WhatIf>,
     landmarks: Res<Landmarks>,
     assets: Res<PreviewAssets>,
     mut pool: Local<ArrowPool>,
@@ -334,14 +434,23 @@ fn show_arrows(
     let now = time.elapsed_secs();
     let flare = flare(&routes, now);
     let base = landmarks.command_center.area();
+    let scenario = what_if.0.as_deref();
+    let (grid, fields) = scenario.map_or((&*grid, &*fields), |scenario| {
+        (&scenario.grid, &scenario.fields)
+    });
 
     let mut wanted = Vec::new();
-    for Route { class, line } in &routes.routes {
+    for &Route {
+        class,
+        ref line,
+        faded,
+    } in &routes.routes
+    {
         let (spacing, size, index) = match class {
             Class::Swarmer => (PREVIEW_SPACING, 1.0, 0),
             Class::Brute => (PREVIEW_BRUTE_SPACING, BRUTE_ARROW_SCALE, 1),
         };
-        let field = fields.get(*class);
+        let field = fields.get(class);
         let length = line.length();
         let mut along = (now * PREVIEW_CRAWL).rem_euclid(spacing);
         while along < length {
@@ -352,18 +461,22 @@ fn show_arrows(
                     .clamp(0.0, 1.0);
                 if !base.contains(at) {
                     let breach = !field.is_clear(field.node_at(at));
-                    let height = column_top(&grid, at.floor().as_ivec2()) + LIFT;
-                    let mut scale = fade * size * flare;
+                    let cell = at.floor().as_ivec2();
+                    let lift = scenario.map_or(0.0, |scenario| scenario.lift(cell));
+                    let height = column_top(grid, cell) + lift + LIFT;
+                    // What a what-if wouldn't change doesn't flare either.
+                    let mut scale = fade * size * if faded { 1.0 } else { flare };
                     if breach {
                         scale *= BREACH_SCALE;
                     }
                     let transform = Transform::from_xyz(at.x, height, at.y)
                         .with_rotation(Quat::from_rotation_y((-heading.x).atan2(-heading.y)))
                         .with_scale(Vec3::splat(scale));
-                    let look = if breach {
-                        &assets.breach
-                    } else {
-                        &assets.arrows[index]
+                    let look = match (breach, faded) {
+                        (true, false) => &assets.breach,
+                        (false, false) => &assets.arrows[index],
+                        (true, true) => &assets.breach_faded,
+                        (false, true) => &assets.arrows_faded[index],
                     };
                     wanted.push((transform, look));
                 }
@@ -417,14 +530,21 @@ fn show_breaches(
     time: Res<Time<Real>>,
     routes: Res<Routes>,
     grid: Res<Grid>,
+    what_if: Res<WhatIf>,
     assets: Res<PreviewAssets>,
     mut pool: Local<MarkerPool>,
-    mut markers: Query<(&Marker, &mut Transform, &mut Visibility)>,
+    mut markers: Query<(
+        &Marker,
+        &mut Transform,
+        &mut Visibility,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
     mut pips: Query<&mut Visibility, Without<Marker>>,
 ) {
     let now = time.elapsed_secs();
     let pulse = 1.0 + MARKER_PULSE * (now * BREACH_PULSE_RATE * std::f32::consts::TAU).sin();
-    let scale = pulse * flare(&routes, now);
+    let flare = flare(&routes, now);
+    let grid = what_if.grid(&grid);
 
     while pool.0.len() < routes.breaches.len() {
         let pip_entities = [0, 1].map(|class| {
@@ -455,7 +575,8 @@ fn show_breaches(
     }
     for (i, &entity) in pool.0.iter().enumerate() {
         // Markers spawned this frame show up next frame.
-        let Ok((marker, mut transform, mut visibility)) = markers.get_mut(entity) else {
+        let Ok((marker, mut transform, mut visibility, mut material)) = markers.get_mut(entity)
+        else {
             continue;
         };
         let Some(breach) = routes.breaches.get(i) else {
@@ -463,12 +584,22 @@ fn show_breaches(
             continue;
         };
         visibility.set_if_neq(Visibility::Inherited);
-        let top = column_top(&grid, breach.cell) + MARKER_LIFT;
+        let top = column_top(grid, breach.cell) + MARKER_LIFT;
+        // One a what-if wouldn't change fades, and stops pulsing.
+        let scale = if breach.faded { 1.0 } else { pulse * flare };
         *transform = Transform::from_translation(cell_center(breach.cell) + Vec3::Y * top)
             .with_scale(Vec3::new(scale, 1.0, scale));
+        let look = if breach.faded {
+            &assets.marker_faded
+        } else {
+            &assets.marker_material
+        };
+        if material.0 != *look {
+            material.0 = look.clone();
+        }
         for (class, &pip) in marker.pips.iter().enumerate() {
             if let Ok(mut visibility) = pips.get_mut(pip) {
-                visibility.set_if_neq(if breach.by[class] {
+                visibility.set_if_neq(if breach.by[class] && !breach.faded {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
@@ -510,5 +641,42 @@ mod tests {
 
     fn smooth_is_straight(points: &[Vec2]) -> bool {
         points.iter().all(|point| point.y == 0.0)
+    }
+
+    #[test]
+    fn a_what_if_fades_what_it_wouldnt_change() {
+        use crate::chunks::offer::Offer;
+        use crate::map::starting_map;
+        use crate::rng::Rng;
+        let (grid, landmarks) = starting_map();
+        let (real_lines, real_breaches) = trace(&grid, &FlowFields::new(&grid, &landmarks));
+        assert_eq!(real_lines.len(), 2, "each class from the starting nest");
+        // The same map again: nothing changes, so everything fades.
+        let scenario = Scenario::new(grid.clone(), &landmarks, None);
+        let (mut lines, mut breaches) = trace(&scenario.grid, &scenario.fields);
+        fade_the_same(&mut lines, &real_lines, &mut breaches, &real_breaches);
+        assert!(lines.iter().all(|route| route.faded));
+        // With a nest claimed, its routes stand out.
+        let offer = Offer::new(&grid, &landmarks, 1, 0, &mut Rng::new(1));
+        let choice = *offer
+            .choices
+            .iter()
+            .find(|choice| choice.nest().is_some())
+            .unwrap();
+        let mut claimed = grid.clone();
+        choice.add_to(&mut claimed);
+        let scenario = Scenario::new(claimed, &landmarks, Some((choice.slot, 0.25)));
+        let (mut lines, mut breaches) = trace(&scenario.grid, &scenario.fields);
+        fade_the_same(&mut lines, &real_lines, &mut breaches, &real_breaches);
+        assert_eq!(lines.len(), 4);
+        let start = choice.nest().unwrap().center().xz();
+        for route in &lines {
+            let from_new_nest = route.line.sample(0.0).unwrap().0 == start;
+            assert!(!from_new_nest || !route.faded, "{route:?}");
+        }
+        // Its ground is drawn lifted.
+        let inside = Grid::chunk_origin(choice.slot) + IVec2::new(3, 3);
+        assert_eq!(scenario.lift(inside), 0.25);
+        assert_eq!(scenario.lift(IVec2::ZERO), 0.0);
     }
 }

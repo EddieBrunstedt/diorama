@@ -2,9 +2,12 @@
 //!
 //! When the build phase after a wave begins, a few chunks are offered at the edge of the map
 //! ([`offer`]), shown where they'd go ([`ghosts`]). The player claims one by clicking it: it drops
-//! onto the map, and a nest in it spawns from the coming wave on. The claim is one step in the
-//! undo history ([`crate::build::history::claim_chunk`]), so it can be taken back (and another
-//! one claimed) until the wave starts. The wave can't start until one is claimed.
+//! onto the map, and a nest in it spawns from the coming wave on (past a few nests, the oldest
+//! goes quiet: see [`Grid::live_nests`]). The claim is one step in the undo history
+//! ([`crate::build::history::claim_chunk`]), so it can be taken back (and another one claimed)
+//! until the wave starts. The wave can't start until one is claimed. While the cursor is on an
+//! offered chunk, the path preview shows the routes as they'd be with it claimed
+//! ([`preview_claim`]).
 //!
 //! The templates chunks are made from, and how they're laid down, are plain data in
 //! [`templates`].
@@ -15,15 +18,18 @@ pub mod templates;
 
 use crate::build::history::{History, claim_chunk};
 use crate::build::{ActiveStroke, BuildSystems, Report, UiHovered, strokes};
-use crate::camera::CameraRig;
+use crate::camera::{CameraRig, MainCamera};
 use crate::economy::{Wallet, nest_bounty};
+use crate::flow::{FlowFields, FlowSystems};
 use crate::grid::Grid;
 use crate::map::{ChunkChanged, Landmarks};
 use crate::pointer::{Pointer, PointerSystems};
+use crate::preview::{PreviewSystems, Scenario, WhatIf};
 use crate::rng::{Rng, RunSeed};
 use crate::tuning::grid::CHUNK_SIZE;
-use crate::waves::Phase;
+use crate::tuning::juice::OFFER_HOVER_LIFT;
 use crate::waves::plan::Run;
+use crate::waves::{ClaimFirst, Phase};
 use bevy::prelude::*;
 use offer::Offer;
 use templates::Claim;
@@ -48,7 +54,14 @@ impl Plugin for ChunksPlugin {
                     .in_set(BuildSystems)
                     .after(PointerSystems),
             )
-            .add_systems(Update, frame_the_map.after(BuildSystems));
+            .add_systems(
+                Update,
+                preview_claim
+                    .after(FlowSystems)
+                    .before(PreviewSystems)
+                    .run_if(resource_changed::<OfferHover>.or_else(resource_changed::<FlowFields>)),
+            )
+            .add_systems(Update, (frame_the_map, show_the_offer).after(BuildSystems));
     }
 }
 
@@ -165,6 +178,31 @@ fn claim(
     });
 }
 
+/// While the cursor is on an offered chunk, the path preview shows the map as it would be with
+/// that chunk claimed: its nest's routes, and how the others' change.
+fn preview_claim(
+    hover: Res<OfferHover>,
+    offer: Res<ChunkOffer>,
+    grid: Res<Grid>,
+    landmarks: Res<Landmarks>,
+    mut what_if: ResMut<WhatIf>,
+) {
+    // The click that claims a chunk leaves the hover on it for the rest of that frame.
+    match hover.0.filter(|_| offer.pending(&grid)) {
+        Some(choice) => {
+            let mut claimed = grid.clone();
+            choice.add_to(&mut claimed);
+            let raised = Some((choice.slot, OFFER_HOVER_LIFT));
+            what_if.0 = Some(Box::new(Scenario::new(claimed, &landmarks, raised)));
+        }
+        None => {
+            if what_if.0.is_some() {
+                what_if.0 = None;
+            }
+        }
+    }
+}
+
 /// The ground a chunk slot covers (world x and z).
 pub fn chunk_area(slot: IVec2) -> Rect {
     let min = Grid::chunk_origin(slot).as_vec2();
@@ -188,14 +226,59 @@ fn frame_the_map(
     }
     let fresh = pending && !*was_pending;
     *was_pending = pending;
-    let Some(bounds) = grid.bounds() else {
-        return;
-    };
+    if let Some(area) = map_area(&grid, &offer) {
+        rig.show(area, fresh);
+    }
+}
+
+/// The ground the map covers, and the chunks on offer while one has to be claimed.
+fn map_area(grid: &Grid, offer: &ChunkOffer) -> Option<Rect> {
+    let bounds = grid.bounds()?;
     let mut area = Rect::from_corners(bounds.min.as_vec2(), (bounds.max + IVec2::ONE).as_vec2());
-    if pending && let Some(offer) = &offer.0 {
+    if let Some(offer) = offer.0.as_ref().filter(|offer| offer.pending(grid)) {
         for choice in &offer.choices {
             area = area.union(chunk_area(choice.slot));
         }
     }
-    rig.show(area, fresh);
+    Some(area)
+}
+
+/// Asking to start the wave before claiming a chunk brings the chunks on offer back into view,
+/// if the player had moved the camera off them.
+fn show_the_offer(
+    mut asked: MessageReader<ClaimFirst>,
+    grid: Res<Grid>,
+    offer: Res<ChunkOffer>,
+    camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
+    mut rig: ResMut<CameraRig>,
+) {
+    if asked.read().count() == 0 {
+        return;
+    }
+    let Some(choices) = offer.0.as_ref().map(|offer| &offer.choices) else {
+        return;
+    };
+    let (camera, transform) = *camera;
+    let Some(view) = camera.logical_viewport_rect() else {
+        return;
+    };
+    let on_screen = |corner: Vec2| {
+        camera
+            .world_to_viewport(transform, Vec3::new(corner.x, 0.0, corner.y))
+            .is_ok_and(|at| view.contains(at))
+    };
+    let all_in_view = choices.iter().all(|choice| {
+        let area = chunk_area(choice.slot);
+        [
+            area.min,
+            area.max,
+            Vec2::new(area.min.x, area.max.y),
+            Vec2::new(area.max.x, area.min.y),
+        ]
+        .into_iter()
+        .all(on_screen)
+    });
+    if !all_in_view && let Some(area) = map_area(&grid, &offer) {
+        rig.show(area, true);
+    }
 }

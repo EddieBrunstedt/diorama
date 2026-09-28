@@ -1,6 +1,7 @@
 //! The chunks on offer, drawn where they'd go: their ground dimmed and cool, a frame around each
 //! (cyan for plain ground, red for a chunk with a nest), and the nest itself. They rise into view
-//! when the offer opens; the one under the cursor lifts and lights up. Once one is claimed, they
+//! when the offer opens; the one under the cursor lifts and lights up. They hop, and their frames
+//! flare, when the player tries to start the wave before claiming one. Once one is claimed, they
 //! all go (the claimed one drops onto the map as real ground, see [`crate::map`]).
 
 use super::templates::Claim;
@@ -11,7 +12,10 @@ use crate::map::{NEST_HEIGHT, chunk_mesh, mud_mesh};
 use crate::palette;
 use crate::shapes::BoxMesh;
 use crate::tuning::grid::CHUNK_SIZE;
-use crate::tuning::juice::{GLOW_BRIGHTNESS, OFFER_HOVER_LIFT, OFFER_PULSE_RATE};
+use crate::tuning::juice::{
+    CLAIM_FIRST_HOP, CLAIM_FIRST_SECONDS, GLOW_BRIGHTNESS, OFFER_HOVER_LIFT, OFFER_PULSE_RATE,
+};
+use crate::waves::ClaimFirst;
 use bevy::prelude::*;
 
 /// The frame around an offered chunk: how wide and tall its bars are.
@@ -33,7 +37,11 @@ impl Plugin for GhostsPlugin {
 
 /// An offered chunk, drawn where it would go.
 #[derive(Component)]
-struct Ghost(Claim);
+struct Ghost {
+    claim: Claim,
+    /// How high it's lifted, easing toward its lift (before any hop).
+    height: f32,
+}
 
 /// Part of an offered chunk's ground, which lights up when the cursor is on the chunk.
 #[derive(Component)]
@@ -102,7 +110,7 @@ fn show_ghosts(
         Some(offer) if offer.pending(&grid) => offer.choices.clone(),
         _ => Vec::new(),
     };
-    let shown: Vec<Claim> = ghosts.iter().map(|(_, ghost)| ghost.0).collect();
+    let shown: Vec<Claim> = ghosts.iter().map(|(_, ghost)| ghost.claim).collect();
     if shown == wanted {
         return;
     }
@@ -136,7 +144,10 @@ fn spawn_ghost(
     };
     commands
         .spawn((
-            Ghost(claim),
+            Ghost {
+                claim,
+                height: RISE_FROM,
+            },
             Transform::from_xyz(origin.x, RISE_FROM, origin.y),
             Visibility::default(),
         ))
@@ -158,7 +169,7 @@ fn spawn_ghost(
                 let at = nest.center().xz() - origin;
                 ghost.spawn((
                     GhostGround { mud: false },
-                    Mesh3d(meshes.add(nest_mesh(nest.size as f32, nest_seed(nest)))),
+                    Mesh3d(meshes.add(nest_mesh(nest.size as f32, nest_seed(nest), false))),
                     MeshMaterial3d(materials.ground.clone()),
                     Transform::from_xyz(at.x, NEST_HEIGHT, at.y),
                 ));
@@ -186,20 +197,31 @@ fn frame_mesh() -> Mesh {
     mesh.build()
 }
 
-/// The ghost under the cursor lifts and lights up; the frames pulse.
+/// The ghost under the cursor lifts and lights up; the frames pulse. Asking to start the wave
+/// makes them all hop, with their frames flaring.
 fn light_ghosts(
     time: Res<Time<Real>>,
     hover: Res<OfferHover>,
+    mut asked: MessageReader<ClaimFirst>,
+    mut flaring: Local<f32>,
     materials: Res<GhostMaterials>,
     mut assets: ResMut<Assets<StandardMaterial>>,
-    mut ghosts: Query<(&Ghost, &mut Transform, &Children)>,
+    mut ghosts: Query<(&mut Ghost, &mut Transform, &Children)>,
     mut grounds: Query<(&GhostGround, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
+    let asked = asked.read().count() > 0;
     if ghosts.is_empty() {
         return;
     }
     let dt = time.delta_secs();
+    if asked {
+        *flaring = CLAIM_FIRST_SECONDS;
+    }
+    *flaring = (*flaring - dt).max(0.0);
+    let flare = *flaring / CLAIM_FIRST_SECONDS;
+    let hop = CLAIM_FIRST_HOP * (flare * std::f32::consts::PI).sin();
     let pulse = 0.5 + 0.5 * (time.elapsed_secs() * OFFER_PULSE_RATE * std::f32::consts::TAU).sin();
+    let pulse = pulse.max(flare);
     for (handle, color) in [
         (&materials.frame, palette::OFFER_FRAME),
         (&materials.frame_nest, palette::OFFER_FRAME_NEST),
@@ -209,11 +231,12 @@ fn light_ghosts(
             material.base_color = (color.to_linear() * glow).into();
         }
     }
-    for (ghost, mut transform, children) in &mut ghosts {
-        let hovered = hover.0 == Some(ghost.0);
+    for (mut ghost, mut transform, children) in &mut ghosts {
+        let hovered = hover.0 == Some(ghost.claim);
         let lift = if hovered { OFFER_HOVER_LIFT } else { 0.0 };
         let ease = 1.0 - (-LIFT_RATE * dt).exp();
-        transform.translation.y = transform.translation.y.lerp(lift, ease);
+        ghost.height = ghost.height.lerp(lift, ease);
+        transform.translation.y = ghost.height + hop;
         for &child in children {
             let Ok((ground, mut material)) = grounds.get_mut(child) else {
                 continue;

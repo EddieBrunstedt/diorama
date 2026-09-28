@@ -4,6 +4,7 @@
 //! in any direction. Cell `(x, y)` covers the world square from `(x, 0, y)` to `(x + 1, 0, y + 1)`:
 //! grid `y` runs along world `+Z`, toward the camera.
 
+use crate::tuning::chunks::LIVE_NESTS;
 use crate::tuning::command_center::MAX_HP as COMMAND_CENTER_HP;
 use crate::tuning::grid::CHUNK_SIZE;
 use crate::tuning::structures::{
@@ -334,8 +335,9 @@ impl CommandCenterHp {
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub struct Grid {
     chunks: HashMap<IVec2, Chunk>,
-    /// Where the horde comes out, in the order they were added (the starting map's first, then
-    /// one per claimed chunk that holds a nest). Their cells are [`Terrain::Nest`].
+    /// Every nest, in the order they were added (the starting map's first, then one per claimed
+    /// chunk that holds a nest). Their cells are [`Terrain::Nest`]. Only the newest few are live
+    /// (see [`Grid::live_nests`]).
     pub nests: Vec<Footprint>,
     /// The Command Center's HP, for the whole building (it stands on several cells). It's kept
     /// with the map so that repairing it is an edit like any other, and can be undone (see
@@ -494,6 +496,17 @@ impl Grid {
             .flat_map(|chunk| &chunk.cells)
             .filter(|cell| cell.structure.and_then(Structure::kind) == Some(kind))
             .count()
+    }
+
+    /// The nests the horde comes out of: the newest [`LIVE_NESTS`], oldest first. Older ones
+    /// have gone quiet: they stay on the map, but nothing comes out of them.
+    pub fn live_nests(&self) -> &[Footprint] {
+        &self.nests[self.nests.len().saturating_sub(LIVE_NESTS)..]
+    }
+
+    /// The nests that have gone quiet, oldest first.
+    pub fn quiet_nests(&self) -> &[Footprint] {
+        &self.nests[..self.nests.len().saturating_sub(LIVE_NESTS)]
     }
 
     /// The smallest rectangle of cells covering the whole map (`max` inclusive).
@@ -790,6 +803,27 @@ mod tests {
             assert_eq!(cell_at(cell_center(cell)), cell);
         }
         assert_eq!(cell_at(Vec3::new(-0.01, 0.0, 0.99)), IVec2::new(-1, 0));
+    }
+
+    #[test]
+    fn only_the_newest_nests_are_live() {
+        let nest = |x| Footprint {
+            min: IVec2::new(x, 0),
+            size: 2,
+        };
+        let mut grid = Grid::default();
+        grid.nests.push(nest(0));
+        assert_eq!(grid.live_nests(), &[nest(0)]);
+        assert!(grid.quiet_nests().is_empty());
+        grid.nests
+            .extend((1..=LIVE_NESTS as i32).map(|i| nest(i * 3)));
+        assert_eq!(grid.live_nests().len(), LIVE_NESTS);
+        assert_eq!(grid.quiet_nests(), &[nest(0)], "the oldest goes quiet");
+        assert_eq!(grid.live_nests()[0], nest(3));
+        // Taking the newest off (undo) wakes the oldest again.
+        grid.nests.pop();
+        assert_eq!(grid.live_nests()[0], nest(0));
+        assert!(grid.quiet_nests().is_empty());
     }
 
     #[test]
